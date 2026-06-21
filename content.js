@@ -54,6 +54,12 @@
     return Math.min(4, 3 + (m - 480) / 480);
   }
 
+  // Gaussian approximation via Box-Muller
+  function randn(rand) {
+    const u = 1 - rand(), v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
   function drawWeb(idleMs) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -63,37 +69,63 @@
     const W = canvas.width;
     const H = canvas.height;
     const TWO_PI = Math.PI * 2;
+    const DEG = Math.PI / 180;
 
     const seed = hashSeed(location.hostname || "newtab");
     const rand = mulberry32(seed);
 
-    // ── Lifecycle parameters ──────────────────────────────────────────────
-    const PEAK  = 1.5;
-    const bell  = Math.exp(-Math.pow((phase - PEAK) / 2.0, 2) * 2.5); // 0→1→0
-    const decay = Math.max(0, (phase - PEAK) / 2.5);                  // 0 at peak → 1
-    const dp2   = decay * decay;
+    // ── Behavioral parameters by lifecycle phase ──────────────────────────
+    // phase 0–1: nascent  1–2: prime (peak 1.5)  2–3: degraded  3–4: decayed
+    let maxRings, angleNoiseDeg, skipRate, sagMult, opacity, frameWidth, radialWidth, spiralWidth;
 
-    const ringCount    = Math.max(2, Math.round(2 + 12 * bell));
-    const tearRate     = dp2 * 0.55;
-    const spacingNoise = dp2 * 0.90;   // inter-ring spacing chaos
-    const sagBase      = 5 + decay * 22;
-    const radialSurv   = 1 - decay * 0.65;   // fraction of full-length radials
-    const frameSurv    = 1 - Math.max(0, decay - 0.5) * 0.72;
-    const opacity      = 0.04 + bell * 0.22;
-    const waver        = decay * 16;          // px of radial waviness
+    if (phase < 1) {
+      const t = phase;
+      maxRings      = Math.round(3 + t * 3);          // 3→6
+      angleNoiseDeg = 4;
+      skipRate      = 0.05;
+      sagMult       = 1;
+      opacity       = 0.06 + t * 0.08;
+      frameWidth    = 1.2;
+      radialWidth   = 1.0;
+      spiralWidth   = 0.5;
+    } else if (phase < 2) {
+      const t = phase - 1;                            // 0→1, peak at 0.5
+      const bell = Math.exp(-Math.pow((t - 0.5) / 0.35, 2));
+      maxRings      = Math.round(6 + bell * 12);      // 6→18→6
+      angleNoiseDeg = 4 - bell * 2;                   // 4→2→4
+      skipRate      = 0.05 - bell * 0.03;             // 5%→2%→5%
+      sagMult       = 1;
+      opacity       = 0.14 + bell * 0.12;
+      frameWidth    = 1.6 + bell * 0.6;
+      radialWidth   = 1.3 + bell * 0.5;
+      spiralWidth   = 0.6 + bell * 0.4;
+    } else if (phase < 3) {
+      const t = phase - 2;
+      maxRings      = Math.round(11 - t * 3);         // 11→8
+      angleNoiseDeg = 4 + t * 11;                     // 4→15
+      skipRate      = 0.05 + t * 0.15;                // 5%→20%
+      sagMult       = 1 + t * 1.5;                    // 1→2.5
+      opacity       = 0.14 - t * 0.05;
+      frameWidth    = 1.6 - t * 0.4;
+      radialWidth   = 1.3 - t * 0.3;
+      spiralWidth   = 0.55;
+    } else {
+      const t = Math.min(1, phase - 3);
+      maxRings      = Math.round(8 - t * 5);          // 8→3
+      angleNoiseDeg = 15 + t * 20;                    // 15→35
+      skipRate      = 0.20 + t * 0.30;                // 20%→50%
+      sagMult       = 2.5 + t * 3.5;                  // 2.5→6
+      opacity       = 0.09 - t * 0.04;
+      frameWidth    = 1.2;
+      radialWidth   = 1.0;
+      spiralWidth   = 0.45;
+    }
+
+    const angleNoiseRad = angleNoiseDeg * DEG;
 
     // ── Hub: seeded position, upper-biased ───────────────────────────────
     const hubX = W * (0.22 + rand() * 0.56);
     const hubY = H * (0.13 + rand() * 0.30);
-
-    // ── Frame: 4–6 irregular anchor vertices near screen edges ───────────
-    const frameN = 4 + Math.floor(rand() * 3);
-    const frameAngles = [];
-    for (let i = 0; i < frameN; i++) {
-      const base = (i / frameN) * TWO_PI;
-      frameAngles.push(base + (rand() - 0.5) * (TWO_PI / frameN) * 0.38);
-    }
-    frameAngles.sort((a, b) => a - b);
 
     // Project from hub in direction `angle` until near screen edge
     function edgeDist(angle) {
@@ -106,137 +138,186 @@
       return t * (0.80 + rand() * 0.16);
     }
 
+    // ── Frame: 4–7 irregular anchor vertices near screen edges ───────────
+    const frameN = 4 + Math.floor(rand() * 4);
+    const frameAngles = [];
+    for (let i = 0; i < frameN; i++) {
+      const base = (i / frameN) * TWO_PI;
+      frameAngles.push(base + (rand() - 0.5) * (TWO_PI / frameN) * 0.4);
+    }
+    frameAngles.sort((a, b) => a - b);
+
     const frameVerts = frameAngles.map(a => {
       const d = edgeDist(a);
-      return { x: hubX + Math.cos(a) * d, y: hubY + Math.sin(a) * d };
+      return { x: hubX + Math.cos(a) * d, y: hubY + Math.sin(a) * d, angle: a, dist: d };
     });
 
-    // ── Radials: frame angles + gap subdivisions ──────────────────────────
+    // ── Radials: frame directions + gap subdivisions ──────────────────────
     const allAngles = [...frameAngles];
     for (let i = 0; i < frameAngles.length; i++) {
       let a1 = frameAngles[i];
       let a2 = frameAngles[(i + 1) % frameAngles.length];
       if (a2 <= a1) a2 += TWO_PI;
       const span = a2 - a1;
-      const extras = Math.floor(span / (Math.PI / 8));
+      const extras = Math.floor(span / (Math.PI / 9));
       for (let k = 1; k <= extras; k++) {
-        const a = a1 + span * (k / (extras + 1)) + (rand() - 0.5) * span / (extras + 1) * 0.22;
+        const frac = k / (extras + 1);
+        const noise = (rand() - 0.5) * span * frac * (1 - frac) * 0.3;
+        const a = a1 + span * frac + noise;
         allAngles.push(((a % TWO_PI) + TWO_PI) % TWO_PI);
       }
     }
     allAngles.sort((a, b) => a - b);
+    const N = allAngles.length;
 
-    // Build radial objects (always consume same rand() count per angle)
+    // Build radials (consume deterministic rand() budget per radial)
     const radials = allAngles.map(angle => {
-      const fullDist   = edgeDist(angle);
-      const survRoll   = rand();
-      const cutFactor  = 0.2 + rand() * 0.45;
-      const dist       = survRoll < radialSurv ? fullDist : fullDist * cutFactor;
-      const midX       = hubX + Math.cos(angle) * fullDist * 0.5;
-      const midY       = hubY + Math.sin(angle) * fullDist * 0.5;
-      const waveMx     = midX + (rand() - 0.5) * waver;
-      const waveMy     = midY + (rand() - 0.5) * waver;
-      return { angle, dist, fullDist, waveMx, waveMy,
-               endX: hubX + Math.cos(angle) * dist,
-               endY: hubY + Math.sin(angle) * dist };
+      const fullDist = edgeDist(angle);
+      rand(); // reserved slot for sequence stability
+      return { angle, dist: fullDist,
+               ex: hubX + Math.cos(angle) * fullDist,
+               ey: hubY + Math.sin(angle) * fullDist };
     });
 
-    const maxDist = Math.max(...radials.map(r => r.fullDist));
+    const maxDist = Math.max(...radials.map(r => r.dist));
 
-    // ── Spiral ring distances from hub (outside→in, tighter near center) ─
-    const ringDists = [];
-    for (let i = 0; i < ringCount; i++) {
-      const t      = (i + 0.5) / ringCount;
-      const baseR  = maxDist * (0.11 + (1 - Math.pow(t, 0.62)) * 0.79);
-      const jitter = (rand() - 0.5) * (maxDist / ringCount) * spacingNoise * 2.5;
-      ringDists.push(Math.max(20, baseR + jitter));
+    // ── Eberhard turnback rule ────────────────────────────────────────────
+    // Spider sits at point Q on radial[i-1]. She looks toward radial[i],
+    // measures how far along it she "should" be to maintain crossing angle β,
+    // then steps there. This is local geometry — no global circles.
+    //
+    // d_next = (Q · e1) + |Q · e2| / tan(β)
+    // where e1 = unit along next radial, e2 = unit perp (toward prev radial).
+    // We work in vectors from hub.
+    function turnbackDist(prevDist, prevAngle, nextAngle, beta) {
+      // Q = spider position on prevRadial (dist from hub = prevDist)
+      const Qx = Math.cos(prevAngle) * prevDist;
+      const Qy = Math.sin(prevAngle) * prevDist;
+      // e1 = unit vector along nextRadial
+      const e1x = Math.cos(nextAngle), e1y = Math.sin(nextAngle);
+      // dot product Q · e1
+      const Qe1 = Qx * e1x + Qy * e1y;
+      // e2 = unit perpendicular to nextRadial pointing toward prevRadial side
+      // (just rotate e1 by ±90° — pick the sign whose dot with Q is positive)
+      const e2xa = -e1y, e2ya = e1x;
+      const Qe2 = Math.abs(Qx * e2xa + Qy * e2ya);
+      const d = Qe1 + Qe2 / Math.tan(beta);
+      return Math.max(4, d);
     }
-    ringDists.sort((a, b) => b - a); // draw outermost first
+
+    // ── Build sticky spiral via spider walk ───────────────────────────────
+    // Spider starts near outermost reachable point on radial[0], walks inward
+    // ring by ring. Each ring is one lap around all radials.
+
+    // Initial position: spider drops to ~90% of shortest radial
+    const minDist = Math.min(...radials.map(r => r.dist));
+    let curDist = minDist * (0.82 + rand() * 0.12);
+    let curIdx  = 0;
+
+    // Target crossing angle β ≈ 75° for real orb weavers
+    const betaBase = 75 * DEG;
+
+    const spiralSegments = []; // { x1,y1, x2,y2, sag }
+
+    for (let ring = 0; ring < maxRings; ring++) {
+      // One full lap
+      for (let step = 0; step < N; step++) {
+        const i    = (curIdx + step) % N;
+        const iNext = (i + 1) % N;
+        const radCur  = radials[i];
+        const radNext = radials[iNext];
+
+        // Spider's current position
+        const x1 = hubX + Math.cos(radCur.angle) * curDist;
+        const y1 = hubY + Math.sin(radCur.angle) * curDist;
+
+        // Skip (torn spiral)
+        const skipRoll = rand();
+        if (skipRoll < skipRate) {
+          // Consume angle noise slot for stability
+          rand();
+          curDist = turnbackDist(curDist, radCur.angle, radNext.angle, betaBase);
+          curDist = Math.min(curDist, radNext.dist * 0.96);
+          curIdx  = iNext;
+          continue;
+        }
+
+        // Noisy crossing angle
+        const beta = betaBase + randn(rand) * angleNoiseRad;
+        let nextDist = turnbackDist(curDist, radCur.angle, radNext.angle, beta);
+        nextDist = Math.min(nextDist, radNext.dist * 0.96);
+        nextDist = Math.max(4, nextDist);
+
+        const x2 = hubX + Math.cos(radNext.angle) * nextDist;
+        const y2 = hubY + Math.sin(radNext.angle) * nextDist;
+
+        // Catenary sag outward from hub
+        const midAngle = (radCur.angle + radNext.angle) / 2;
+        const avgDist  = (curDist + nextDist) / 2;
+        const span     = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+        const sagAmt   = span * 0.04 * sagMult * (0.7 + rand() * 0.6);
+        const ox = Math.cos(midAngle) * sagAmt;
+        const oy = Math.sin(midAngle) * sagAmt;
+
+        spiralSegments.push({ x1, y1, x2, y2, ox, oy });
+
+        curDist = nextDist;
+        curIdx  = iNext;
+      }
+
+      // Spiral inward: reduce distance before next lap
+      curDist *= 0.78 + rand() * 0.08;
+      if (curDist < maxDist * 0.04) break;
+    }
 
     // ── Drawing ───────────────────────────────────────────────────────────
     ctx.lineCap  = "round";
     ctx.lineJoin = "round";
 
-    // Frame edges (irregular polygon)
-    ctx.strokeStyle = `rgba(143, 136, 122, ${opacity * 1.2})`;
-    ctx.lineWidth   = 1.3 + bell * 0.9;
+    // Frame edges (irregular polygon, sag downward)
+    ctx.strokeStyle = `rgba(143, 136, 122, ${Math.min(0.9, opacity * 1.3)})`;
+    ctx.lineWidth   = frameWidth;
     for (let i = 0; i < frameVerts.length; i++) {
+      // skip roll for degraded/decayed frames
       const skipRoll = rand();
-      if (skipRoll > frameSurv) continue;
+      if (skipRoll < skipRate * 0.5) continue;
       const v1 = frameVerts[i];
       const v2 = frameVerts[(i + 1) % frameVerts.length];
+      const span = Math.sqrt((v2.x - v1.x) ** 2 + (v2.y - v1.y) ** 2);
+      const sagY = span * 0.04 * sagMult;
       ctx.beginPath();
       ctx.moveTo(v1.x, v1.y);
-      // Gravity sag proportional to horizontal span
-      const sagY = Math.abs(v2.x - v1.x) * 0.05 * (1 + decay * 3);
-      ctx.quadraticCurveTo(
-        (v1.x + v2.x) / 2,
-        (v1.y + v2.y) / 2 + sagY,
+      ctx.bezierCurveTo(
+        v1.x + (v2.x - v1.x) / 3,     v1.y + (v2.y - v1.y) / 3 + sagY,
+        v1.x + (v2.x - v1.x) * 2 / 3, v1.y + (v2.y - v1.y) * 2 / 3 + sagY,
         v2.x, v2.y,
       );
       ctx.stroke();
     }
 
-    // Radials (frame silk — thicker, more opaque)
-    ctx.strokeStyle = `rgba(143, 136, 122, ${opacity})`;
-    ctx.lineWidth   = 1.1 + bell * 0.75;
+    // Radials
+    ctx.strokeStyle = `rgba(143, 136, 122, ${Math.min(0.9, opacity * 1.1)})`;
+    ctx.lineWidth   = radialWidth;
     for (const rad of radials) {
       ctx.beginPath();
       ctx.moveTo(hubX, hubY);
-      ctx.quadraticCurveTo(rad.waveMx, rad.waveMy, rad.endX, rad.endY);
+      ctx.lineTo(rad.ex, rad.ey);
       ctx.stroke();
     }
 
-    // Capture spiral (finer, lighter)
-    ctx.strokeStyle = `rgba(143, 136, 122, ${opacity * 0.65})`;
-    ctx.lineWidth   = 0.45 + bell * 0.55;
-
-    for (const ringR of ringDists) {
-      const ringSkip = rand();
-      if (ringSkip < dp2 * 0.22) continue; // decay causes whole rings to vanish
-
-      ctx.beginPath();
-      let penDown = false, prevX = 0, prevY = 0, prevAngle = 0;
-
-      for (let i = 0; i < radials.length; i++) {
-        const rad = radials[i];
-        // Always consume 3 rand() per (ring, radial) for sequence stability
-        const jR   = ringR * (1 + (rand() - 0.5) * spacingNoise * 0.35);
-        const tear = rand();
-        const sagR = rand();
-
-        if (jR > rad.dist * 0.97) { penDown = false; continue; }
-
-        const px = hubX + Math.cos(rad.angle) * jR;
-        const py = hubY + Math.sin(rad.angle) * jR;
-
-        if (!penDown) {
-          ctx.moveTo(px, py);
-          penDown = true; prevX = px; prevY = py; prevAngle = rad.angle;
-          continue;
-        }
-
-        if (tear < tearRate) {
-          ctx.moveTo(px, py);
-          prevX = px; prevY = py; prevAngle = rad.angle;
-          continue;
-        }
-
-        // Catenary sag: cubic bezier bowed outward from hub
-        const mid = (prevAngle + rad.angle) / 2;
-        const sag = (jR / maxDist) * sagBase * (0.65 + sagR * 0.7);
-        const ox  = Math.cos(mid) * sag;
-        const oy  = Math.sin(mid) * sag;
-
-        ctx.bezierCurveTo(
-          prevX * 2/3 + px * 1/3 + ox, prevY * 2/3 + py * 1/3 + oy,
-          prevX * 1/3 + px * 2/3 + ox, prevY * 1/3 + py * 2/3 + oy,
-          px, py,
-        );
-        prevX = px; prevY = py; prevAngle = rad.angle;
-      }
-      ctx.stroke();
+    // Sticky spiral
+    ctx.strokeStyle = `rgba(143, 136, 122, ${Math.min(0.9, opacity * 0.75)})`;
+    ctx.lineWidth   = spiralWidth;
+    ctx.beginPath();
+    for (const seg of spiralSegments) {
+      ctx.moveTo(seg.x1, seg.y1);
+      ctx.bezierCurveTo(
+        seg.x1 * 2/3 + seg.x2 * 1/3 + seg.ox, seg.y1 * 2/3 + seg.y2 * 1/3 + seg.oy,
+        seg.x1 * 1/3 + seg.x2 * 2/3 + seg.ox, seg.y1 * 1/3 + seg.y2 * 2/3 + seg.oy,
+        seg.x2, seg.y2,
+      );
     }
+    ctx.stroke();
   }
 
   // ── Phase 2: receive idle duration from background worker ────────────────
