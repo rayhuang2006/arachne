@@ -30,4 +30,10 @@
   ctx.closePath();
   ctx.fillStyle = "rgba(220, 38, 38, 0.85)";
   ctx.fill();
+  // Phase 2: receive idle duration from background worker
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === "ARACHNE_IDLE_DURATION") {
+      console.log(`[Arachne] 這個分頁閒置了 ${msg.label}（${msg.idleMs} ms）`);
+    }
+  });
 })();

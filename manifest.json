@@ -13,5 +13,5 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": []
+  "permissions": ["storage"]
 }
