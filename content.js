@@ -62,12 +62,12 @@
       [order[i], order[j]] = [order[j], order[i]];
     }
 
-    // Global opacity ramps up then slightly fades in decay
+    // Global opacity — boosted so corner webs are clearly visible
     const opacity =
-      phase < 1 ? 0.10 + phase * 0.10
-      : phase < 2 ? 0.20 + (phase - 1) * 0.06
-      : phase < 3 ? 0.26 - (phase - 2) * 0.02
-      : 0.24;
+      phase < 1 ? 0.30 + phase * 0.20
+      : phase < 2 ? 0.50 + (phase - 1) * 0.10
+      : phase < 3 ? 0.60 - (phase - 2) * 0.05
+      : 0.55;
 
     // Max reach from any corner: hard-capped so center stays clear
     const maxReach = Math.min(W * 0.48, H * 0.48, Math.min(W, H) * (0.20 + phase * 0.072));
@@ -118,8 +118,8 @@
       }));
 
       // Draw radials
-      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 1.35)})`;
-      ctx.lineWidth   = 0.9 + cp * 0.55;
+      ctx.strokeStyle = `rgba(200, 195, 180, ${Math.min(0.9, opacity)})`;
+      ctx.lineWidth   = 1.2 + cp * 0.8;
       for (const ep of eps) {
         ctx.beginPath();
         ctx.moveTo(def.x, def.y);
@@ -128,8 +128,8 @@
       }
 
       // Draw connecting rings between adjacent radials
-      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 0.90)})`;
-      ctx.lineWidth   = 0.55;
+      ctx.strokeStyle = `rgba(200, 195, 180, ${Math.min(0.9, opacity * 0.85)})`;
+      ctx.lineWidth   = 0.8;
       for (let r = 0; r < numRings; r++) {
         const t = (r + 1) / (numRings + 1);
         for (let k = 0; k < angles.length - 1; k++) {
@@ -158,75 +158,8 @@
       }
     }
 
-    // ── Layer 2: drooping threads ─────────────────────────────────────────
-    if (phase > 0.8) {
-      const numDrops = Math.floor((phase - 0.8) * 7);
-
-      // Anchor points: corners + points distributed along each edge
-      const anc = [
-        [0,       0      ], [W,       0      ], [W,       H      ], [0,       H      ],
-        [W * 0.2, 0      ], [W * 0.5, 0      ], [W * 0.8, 0      ],
-        [0,       H * 0.2], [0,       H * 0.5], [0,       H * 0.8],
-        [W,       H * 0.2], [W,       H * 0.5], [W,       H * 0.8],
-        [W * 0.2, H      ], [W * 0.5, H      ], [W * 0.8, H      ],
-      ];
-
-      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 0.60)})`;
-      ctx.lineWidth   = 0.65;
-
-      for (let i = 0; i < numDrops; i++) {
-        let ai = Math.floor(rand() * anc.length);
-        let aj = Math.floor(rand() * anc.length);
-        // Avoid same point; bias toward corner-to-corner or corner-to-edge
-        if (ai === aj) aj = (aj + 1) % anc.length;
-
-        const x1 = anc[ai][0] + (rand() - 0.5) * W * 0.07;
-        const y1 = anc[ai][1] + (rand() - 0.5) * H * 0.07;
-        const x2 = anc[aj][0] + (rand() - 0.5) * W * 0.07;
-        const y2 = anc[aj][1] + (rand() - 0.5) * H * 0.07;
-
-        const span = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-        const sag  = span * (0.07 + rand() * 0.16) * (0.5 + phase * 0.28);
-
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.bezierCurveTo(
-          x1 + (x2 - x1) / 3,       y1 + (y2 - y1) / 3       + sag,
-          x1 + (x2 - x1) * (2 / 3), y1 + (y2 - y1) * (2 / 3) + sag,
-          x2, y2,
-        );
-        ctx.stroke();
-      }
-    }
-
-    // ── Layer 3: stray threads ────────────────────────────────────────────
-    if (phase > 0.5) {
-      const numStrays  = Math.floor((phase - 0.5) * 18);
-      const strayZone  = Math.min(W, H) * Math.min(0.38, 0.10 + phase * 0.065);
-      const corners4   = [[0, 0], [W, 0], [W, H], [0, H]];
-
-      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 0.38)})`;
-      ctx.lineWidth   = 0.40;
-
-      for (let i = 0; i < numStrays; i++) {
-        const c  = corners4[Math.floor(rand() * 4)];
-        const ox = c[0] + (rand() - 0.5) * strayZone;
-        const oy = c[1] + (rand() - 0.5) * strayZone;
-        const len = 12 + rand() * 65;
-        const ang = rand() * Math.PI * 2;
-        const ex  = ox + Math.cos(ang) * len;
-        const ey  = oy + Math.sin(ang) * len;
-
-        ctx.beginPath();
-        ctx.moveTo(ox, oy);
-        ctx.quadraticCurveTo(
-          (ox + ex) / 2 + (rand() - 0.5) * 14,
-          (oy + ey) / 2 + (rand() - 0.5) * 14,
-          ex, ey,
-        );
-        ctx.stroke();
-      }
-    }
+    // Layer 2 (drooping threads) and Layer 3 (stray threads) temporarily
+    // removed — validating corner web shape first.
   }
 
   // ── Message listener (from background worker) ────────────────────────────
