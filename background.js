@@ -57,3 +57,17 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   const [tab] = await chrome.tabs.query({ active: true, windowId });
   if (tab) handleTabActivated(tab.id);
 });
+
+// ── Debug helper (call from service worker DevTools console) ─────────────
+// 1. Open chrome://extensions → Arachne → "Service Worker" link
+// 2. In that console:
+//      const [tab] = await chrome.tabs.query({active:true, currentWindow:true})
+//      debugWeb(tab.id, 3600)   // simulate 1-hour idle on active tab
+self.debugWeb = async (tabId, seconds) => {
+  const idleMs = seconds * 1000;
+  await chrome.tabs.sendMessage(tabId, {
+    type: "ARACHNE_IDLE_DURATION",
+    idleMs,
+    label: `${seconds}s (debug)`,
+  });
+};
