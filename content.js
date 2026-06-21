@@ -1,29 +1,19 @@
 (function () {
-  // ── Phase 1: canvas overlay ──────────────────────────────────────────────
-
   if (document.getElementById("arachne-canvas")) return;
 
   const canvas = document.createElement("canvas");
   canvas.id = "arachne-canvas";
-
   Object.assign(canvas.style, {
-    position: "fixed",
-    top: "0",
-    left: "0",
-    width: "100vw",
-    height: "100vh",
-    zIndex: "2147483647",
-    pointerEvents: "none",
+    position: "fixed", top: "0", left: "0",
+    width: "100vw", height: "100vh",
+    zIndex: "2147483647", pointerEvents: "none",
   });
-
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
   document.body.appendChild(canvas);
   const ctx = canvas.getContext("2d");
 
-  // ── Phase 3: spider web generation ──────────────────────────────────────
-
-  // Seeded PRNG — same seed always produces the same sequence
+  // ── Seeded PRNG ──────────────────────────────────────────────────────────
   function mulberry32(seed) {
     return function () {
       seed |= 0;
@@ -34,7 +24,7 @@
     };
   }
 
-  // FNV-1a hash: hostname string → stable integer seed
+  // FNV-1a: hostname → stable integer seed
   function hashSeed(str) {
     let h = 0x811c9dc5;
     for (let i = 0; i < str.length; i++) {
@@ -44,8 +34,7 @@
     return h >>> 0;
   }
 
-  // Idle time → lifecycle phase (0–4)
-  // 0–1: nascent  1–2: prime (peak ~1.5)  2–3: degraded  3–4: decayed
+  // Idle ms → continuous phase 0–4
   function idleToPhase(idleMs) {
     const m = idleMs / 60000;
     if (m < 10)  return m / 10;
@@ -54,261 +43,193 @@
     return Math.min(4, 3 + (m - 480) / 480);
   }
 
-  // Gaussian approximation via Box-Muller
-  function randn(rand) {
-    const u = 1 - rand(), v = rand();
-    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-  }
-
+  // ── Main draw ────────────────────────────────────────────────────────────
   function drawWeb(idleMs) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const phase = idleToPhase(idleMs);
-    if (phase < 0.06) return;
+    if (phase < 0.05) return;
 
-    const W = canvas.width;
-    const H = canvas.height;
-    const TWO_PI = Math.PI * 2;
-    const DEG = Math.PI / 180;
+    const W = canvas.width, H = canvas.height;
 
     const seed = hashSeed(location.hostname || "newtab");
     const rand = mulberry32(seed);
 
-    // ── Behavioral parameters by lifecycle phase ──────────────────────────
-    // phase 0–1: nascent  1–2: prime (peak 1.5)  2–3: degraded  3–4: decayed
-    //
-    // β is the spiral-radial crossing angle. Convergence requires β > 90°−α/2
-    // where α = inter-radial gap. With ~20 radials α≈18°, β_crit≈81°.
-    // β=85° → each step shrinks radius to ~97.8%, one full circuit to ~64%.
-    // Lowering β toward β_crit slows convergence (fewer rings before stopping).
-    let betaBaseDeg, angleNoiseDeg, skipRate, sagMult, opacity,
-        frameWidth, radialWidth, spiralWidth;
-
-    if (phase < 1) {
-      const t = phase;
-      betaBaseDeg   = 83.5;                           // slow convergence → sparse rings
-      angleNoiseDeg = 5;
-      skipRate      = 0.05;
-      sagMult       = 1;
-      opacity       = 0.06 + t * 0.08;
-      frameWidth    = 1.2;
-      radialWidth   = 1.0;
-      spiralWidth   = 0.5;
-    } else if (phase < 2) {
-      const t = phase - 1;                            // 0→1, peak at 0.5
-      const bell = Math.exp(-Math.pow((t - 0.5) / 0.35, 2));
-      betaBaseDeg   = 85 + bell * 1.5;               // 85→86.5→85: tighter at peak
-      angleNoiseDeg = 4 - bell * 2;                   // 4→2→4
-      skipRate      = 0.05 - bell * 0.03;             // 5%→2%→5%
-      sagMult       = 1;
-      opacity       = 0.14 + bell * 0.12;
-      frameWidth    = 1.6 + bell * 0.6;
-      radialWidth   = 1.3 + bell * 0.5;
-      spiralWidth   = 0.6 + bell * 0.4;
-    } else if (phase < 3) {
-      const t = phase - 2;
-      betaBaseDeg   = 85 - t * 3;                    // 85→82: looser, fewer rings
-      angleNoiseDeg = 4 + t * 11;                     // 4→15
-      skipRate      = 0.05 + t * 0.15;                // 5%→20%
-      sagMult       = 1 + t * 1.5;                    // 1→2.5
-      opacity       = 0.14 - t * 0.05;
-      frameWidth    = 1.6 - t * 0.4;
-      radialWidth   = 1.3 - t * 0.3;
-      spiralWidth   = 0.55;
-    } else {
-      const t = Math.min(1, phase - 3);
-      betaBaseDeg   = 82 - t * 1.5;                  // 82→80.5: near β_crit, very few rings
-      angleNoiseDeg = 15 + t * 20;                    // 15→35
-      skipRate      = 0.20 + t * 0.30;                // 20%→50%
-      sagMult       = 2.5 + t * 3.5;                  // 2.5→6
-      opacity       = 0.09 - t * 0.04;
-      frameWidth    = 1.2;
-      radialWidth   = 1.0;
-      spiralWidth   = 0.45;
+    // Corner appearance order: shuffle once per site
+    const order = [0, 1, 2, 3];
+    for (let i = 3; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
     }
 
-    const betaBase      = betaBaseDeg * DEG;
-    const angleNoiseRad = angleNoiseDeg * DEG;
+    // Global opacity ramps up then slightly fades in decay
+    const opacity =
+      phase < 1 ? 0.10 + phase * 0.10
+      : phase < 2 ? 0.20 + (phase - 1) * 0.06
+      : phase < 3 ? 0.26 - (phase - 2) * 0.02
+      : 0.24;
 
-    // ── Hub: seeded position, upper-biased ───────────────────────────────
-    const hubX = W * (0.22 + rand() * 0.56);
-    const hubY = H * (0.13 + rand() * 0.30);
+    // Max reach from any corner: hard-capped so center stays clear
+    const maxReach = Math.min(W * 0.48, H * 0.48, Math.min(W, H) * (0.20 + phase * 0.072));
 
-    // Project from hub in direction `angle` until near screen edge
-    function edgeDist(angle) {
-      const c = Math.cos(angle), s = Math.sin(angle);
-      let t = 1e9;
-      if (c >  1e-9) t = Math.min(t, (W * 0.96 - hubX) / c);
-      if (c < -1e-9) t = Math.min(t, (W * 0.04 - hubX) / c);
-      if (s >  1e-9) t = Math.min(t, (H * 0.96 - hubY) / s);
-      if (s < -1e-9) t = Math.min(t, (H * 0.04 - hubY) / s);
-      return t * (0.80 + rand() * 0.16);
-    }
+    // How many corners are active
+    const numActive = Math.min(4, Math.floor(phase) + 1);
 
-    // ── Frame: 4–7 irregular anchor vertices near screen edges ───────────
-    const frameN = 4 + Math.floor(rand() * 4);
-    const frameAngles = [];
-    for (let i = 0; i < frameN; i++) {
-      const base = (i / frameN) * TWO_PI;
-      frameAngles.push(base + (rand() - 0.5) * (TWO_PI / frameN) * 0.4);
-    }
-    frameAngles.sort((a, b) => a - b);
+    // [cornerX, cornerY, fanStart°, fanEnd°] — angles in radians
+    const P2 = Math.PI / 2;
+    const cornerDefs = [
+      { x: 0, y: 0, a0: 0,      a1: P2 },         // top-left
+      { x: W, y: 0, a0: P2,     a1: Math.PI },     // top-right
+      { x: W, y: H, a0: Math.PI,a1: 3 * P2 },      // bottom-right
+      { x: 0, y: H, a0: 3 * P2, a1: 2 * Math.PI }, // bottom-left
+    ];
 
-    const frameVerts = frameAngles.map(a => {
-      const d = edgeDist(a);
-      return { x: hubX + Math.cos(a) * d, y: hubY + Math.sin(a) * d, angle: a, dist: d };
-    });
-
-    // ── Radials: frame directions + gap subdivisions ──────────────────────
-    const allAngles = [...frameAngles];
-    for (let i = 0; i < frameAngles.length; i++) {
-      let a1 = frameAngles[i];
-      let a2 = frameAngles[(i + 1) % frameAngles.length];
-      if (a2 <= a1) a2 += TWO_PI;
-      const span = a2 - a1;
-      const extras = Math.floor(span / (Math.PI / 9));
-      for (let k = 1; k <= extras; k++) {
-        const frac = k / (extras + 1);
-        const noise = (rand() - 0.5) * span * frac * (1 - frac) * 0.3;
-        const a = a1 + span * frac + noise;
-        allAngles.push(((a % TWO_PI) + TWO_PI) % TWO_PI);
-      }
-    }
-    allAngles.sort((a, b) => a - b);
-    const N = allAngles.length;
-
-    // Build radials (consume deterministic rand() budget per radial)
-    const radials = allAngles.map(angle => {
-      const fullDist = edgeDist(angle);
-      rand(); // reserved slot for sequence stability
-      return { angle, dist: fullDist,
-               ex: hubX + Math.cos(angle) * fullDist,
-               ey: hubY + Math.sin(angle) * fullDist };
-    });
-
-    const maxDist = Math.max(...radials.map(r => r.dist));
-
-    // ── Eberhard turnback rule ────────────────────────────────────────────
-    // Spider at Q on radial[i] steps to radial[i+1] at the distance that
-    // makes the silk cross the radial at angle β. Pure local geometry:
-    //
-    //   d_next = (Q·e1) + |Q·e2| / tan(β)
-    //
-    // where e1 = unit along next radial, e2 = unit perp to next radial.
-    // For β > 90°−α/2 (α = inter-radial gap), d_next < |Q| → natural inward spiral.
-    function turnbackDist(prevDist, prevAngle, nextAngle, beta) {
-      const Qx  = Math.cos(prevAngle) * prevDist;
-      const Qy  = Math.sin(prevAngle) * prevDist;
-      const e1x = Math.cos(nextAngle), e1y = Math.sin(nextAngle);
-      const Qe1 = Qx * e1x + Qy * e1y;
-      const Qe2 = Math.abs(-Qx * e1y + Qy * e1x);   // |Q × e1|, perp component
-      return Math.max(4, Qe1 + Qe2 / Math.tan(beta));
-    }
-
-    // ── Continuous spider walk (no outer ring loop) ───────────────────────
-    // Spider starts near the shortest radial's tip and walks continuously.
-    // Convergence is the natural result of β > β_crit; we stop when the
-    // spider reaches the hub zone (curDist < maxDist * 0.05) or after a
-    // safety-cap of N * 40 steps (prevents infinite loop if β ≈ β_crit).
-    const minDist  = Math.min(...radials.map(r => r.dist));
-    let curDist    = minDist * (0.82 + rand() * 0.12);
-    let curIdx     = 0;
-    const stopDist = maxDist * 0.05;
-    const maxSteps = N * 40;
-
-    const spiralSegments = [];
-
-    for (let step = 0; step < maxSteps; step++) {
-      const i     = curIdx % N;
-      const iNext = (i + 1) % N;
-      const radCur  = radials[i];
-      const radNext = radials[iNext];
-
-      const x1 = hubX + Math.cos(radCur.angle) * curDist;
-      const y1 = hubY + Math.sin(radCur.angle) * curDist;
-
-      // Consume 2 rand() slots regardless of skip, keeping sequence stable
-      const skipRoll = rand();
-      const noiseVal = randn(rand);
-
-      // Apply noisy β; on a skip we still advance curDist via β_base
-      const beta     = betaBase + noiseVal * angleNoiseRad;
-      let nextDist   = turnbackDist(curDist, radCur.angle, radNext.angle,
-                                    skipRoll < skipRate ? betaBase : beta);
-      nextDist = Math.min(nextDist, radNext.dist * 0.96);
-      nextDist = Math.max(4, nextDist);
-
-      if (skipRoll >= skipRate) {
-        const x2 = hubX + Math.cos(radNext.angle) * nextDist;
-        const y2 = hubY + Math.sin(radNext.angle) * nextDist;
-
-        const midAngle = (radCur.angle + radNext.angle) / 2;
-        const span     = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-        const sagAmt   = span * 0.04 * sagMult * (0.7 + rand() * 0.6);
-        const ox = Math.cos(midAngle) * sagAmt;
-        const oy = Math.sin(midAngle) * sagAmt;
-        spiralSegments.push({ x1, y1, x2, y2, ox, oy });
-      } else {
-        rand(); // keep sag slot consumed for skipped steps too
-      }
-
-      curDist = nextDist;
-      curIdx  = iNext;
-      if (curDist <= stopDist) break;
-    }
-
-    // ── Drawing ───────────────────────────────────────────────────────────
     ctx.lineCap  = "round";
     ctx.lineJoin = "round";
 
-    // Frame edges (irregular polygon, sag downward)
-    ctx.strokeStyle = `rgba(143, 136, 122, ${Math.min(0.9, opacity * 1.3)})`;
-    ctx.lineWidth   = frameWidth;
-    for (let i = 0; i < frameVerts.length; i++) {
-      // skip roll for degraded/decayed frames
-      const skipRoll = rand();
-      if (skipRoll < skipRate * 0.5) continue;
-      const v1 = frameVerts[i];
-      const v2 = frameVerts[(i + 1) % frameVerts.length];
-      const span = Math.sqrt((v2.x - v1.x) ** 2 + (v2.y - v1.y) ** 2);
-      const sagY = span * 0.04 * sagMult;
-      ctx.beginPath();
-      ctx.moveTo(v1.x, v1.y);
-      ctx.bezierCurveTo(
-        v1.x + (v2.x - v1.x) / 3,     v1.y + (v2.y - v1.y) / 3 + sagY,
-        v1.x + (v2.x - v1.x) * 2 / 3, v1.y + (v2.y - v1.y) * 2 / 3 + sagY,
-        v2.x, v2.y,
-      );
-      ctx.stroke();
+    // ── Layer 1: corner webs ─────────────────────────────────────────────
+    for (let ci = 0; ci < numActive; ci++) {
+      const def = cornerDefs[order[ci]];
+      const cp  = Math.min(1, phase - ci); // this corner's maturity 0→1
+      if (cp <= 0) continue;
+
+      const spread      = maxReach * (0.40 + cp * 0.60);
+      const numRadials  = Math.max(3, Math.round(3 + cp * 3 + rand() * 1.5));
+      const numRings    = Math.max(2, Math.round(2 + cp * 3));
+      const fanSpan     = def.a1 - def.a0;
+
+      // Build radial angles: always anchor both fan edges, fill in between
+      const angles = [
+        def.a0 + rand() * fanSpan * 0.12,
+        def.a1 - rand() * fanSpan * 0.12,
+      ];
+      for (let k = 0; k < numRadials - 2; k++) {
+        const base  = def.a0 + ((k + 1) / (numRadials - 1)) * fanSpan;
+        const noise = (rand() - 0.5) * (fanSpan / numRadials) * 0.9;
+        angles.push(base + noise);
+      }
+      angles.sort((a, b) => a - b);
+
+      // Radial endpoints (varying lengths for ragged look)
+      const eps = angles.map(angle => ({
+        angle,
+        x: def.x + Math.cos(angle) * spread * (0.50 + rand() * 0.50),
+        y: def.y + Math.sin(angle) * spread * (0.50 + rand() * 0.50),
+      }));
+
+      // Draw radials
+      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 1.35)})`;
+      ctx.lineWidth   = 0.9 + cp * 0.55;
+      for (const ep of eps) {
+        ctx.beginPath();
+        ctx.moveTo(def.x, def.y);
+        ctx.lineTo(ep.x, ep.y);
+        ctx.stroke();
+      }
+
+      // Draw connecting rings between adjacent radials
+      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 0.90)})`;
+      ctx.lineWidth   = 0.55;
+      for (let r = 0; r < numRings; r++) {
+        const t = (r + 1) / (numRings + 1);
+        for (let k = 0; k < angles.length - 1; k++) {
+          // Younger corners are more ragged (higher skip rate)
+          if (rand() < 0.10 + (1 - cp) * 0.22) continue;
+
+          const r1 = spread * t * (0.88 + rand() * 0.24);
+          const r2 = spread * t * (0.88 + rand() * 0.24);
+          const x1 = def.x + Math.cos(angles[k])     * r1;
+          const y1 = def.y + Math.sin(angles[k])     * r1;
+          const x2 = def.x + Math.cos(angles[k + 1]) * r2;
+          const y2 = def.y + Math.sin(angles[k + 1]) * r2;
+
+          const span = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+          const sag  = span * 0.055 * (1 + phase * 0.25);
+
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.quadraticCurveTo(
+            (x1 + x2) / 2 + (rand() - 0.5) * 8,
+            (y1 + y2) / 2 + sag + (rand() - 0.5) * 4,
+            x2, y2,
+          );
+          ctx.stroke();
+        }
+      }
     }
 
-    // Radials
-    ctx.strokeStyle = `rgba(143, 136, 122, ${Math.min(0.9, opacity * 1.1)})`;
-    ctx.lineWidth   = radialWidth;
-    for (const rad of radials) {
-      ctx.beginPath();
-      ctx.moveTo(hubX, hubY);
-      ctx.lineTo(rad.ex, rad.ey);
-      ctx.stroke();
+    // ── Layer 2: drooping threads ─────────────────────────────────────────
+    if (phase > 0.8) {
+      const numDrops = Math.floor((phase - 0.8) * 7);
+
+      // Anchor points: corners + points distributed along each edge
+      const anc = [
+        [0,       0      ], [W,       0      ], [W,       H      ], [0,       H      ],
+        [W * 0.2, 0      ], [W * 0.5, 0      ], [W * 0.8, 0      ],
+        [0,       H * 0.2], [0,       H * 0.5], [0,       H * 0.8],
+        [W,       H * 0.2], [W,       H * 0.5], [W,       H * 0.8],
+        [W * 0.2, H      ], [W * 0.5, H      ], [W * 0.8, H      ],
+      ];
+
+      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 0.60)})`;
+      ctx.lineWidth   = 0.65;
+
+      for (let i = 0; i < numDrops; i++) {
+        let ai = Math.floor(rand() * anc.length);
+        let aj = Math.floor(rand() * anc.length);
+        // Avoid same point; bias toward corner-to-corner or corner-to-edge
+        if (ai === aj) aj = (aj + 1) % anc.length;
+
+        const x1 = anc[ai][0] + (rand() - 0.5) * W * 0.07;
+        const y1 = anc[ai][1] + (rand() - 0.5) * H * 0.07;
+        const x2 = anc[aj][0] + (rand() - 0.5) * W * 0.07;
+        const y2 = anc[aj][1] + (rand() - 0.5) * H * 0.07;
+
+        const span = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+        const sag  = span * (0.07 + rand() * 0.16) * (0.5 + phase * 0.28);
+
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.bezierCurveTo(
+          x1 + (x2 - x1) / 3,       y1 + (y2 - y1) / 3       + sag,
+          x1 + (x2 - x1) * (2 / 3), y1 + (y2 - y1) * (2 / 3) + sag,
+          x2, y2,
+        );
+        ctx.stroke();
+      }
     }
 
-    // Sticky spiral
-    ctx.strokeStyle = `rgba(143, 136, 122, ${Math.min(0.9, opacity * 0.75)})`;
-    ctx.lineWidth   = spiralWidth;
-    ctx.beginPath();
-    for (const seg of spiralSegments) {
-      ctx.moveTo(seg.x1, seg.y1);
-      ctx.bezierCurveTo(
-        seg.x1 * 2/3 + seg.x2 * 1/3 + seg.ox, seg.y1 * 2/3 + seg.y2 * 1/3 + seg.oy,
-        seg.x1 * 1/3 + seg.x2 * 2/3 + seg.ox, seg.y1 * 1/3 + seg.y2 * 2/3 + seg.oy,
-        seg.x2, seg.y2,
-      );
+    // ── Layer 3: stray threads ────────────────────────────────────────────
+    if (phase > 0.5) {
+      const numStrays  = Math.floor((phase - 0.5) * 18);
+      const strayZone  = Math.min(W, H) * Math.min(0.38, 0.10 + phase * 0.065);
+      const corners4   = [[0, 0], [W, 0], [W, H], [0, H]];
+
+      ctx.strokeStyle = `rgba(218, 212, 200, ${Math.min(0.9, opacity * 0.38)})`;
+      ctx.lineWidth   = 0.40;
+
+      for (let i = 0; i < numStrays; i++) {
+        const c  = corners4[Math.floor(rand() * 4)];
+        const ox = c[0] + (rand() - 0.5) * strayZone;
+        const oy = c[1] + (rand() - 0.5) * strayZone;
+        const len = 12 + rand() * 65;
+        const ang = rand() * Math.PI * 2;
+        const ex  = ox + Math.cos(ang) * len;
+        const ey  = oy + Math.sin(ang) * len;
+
+        ctx.beginPath();
+        ctx.moveTo(ox, oy);
+        ctx.quadraticCurveTo(
+          (ox + ex) / 2 + (rand() - 0.5) * 14,
+          (oy + ey) / 2 + (rand() - 0.5) * 14,
+          ex, ey,
+        );
+        ctx.stroke();
+      }
     }
-    ctx.stroke();
   }
 
-  // ── Phase 2: receive idle duration from background worker ────────────────
-
+  // ── Message listener (from background worker) ────────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "ARACHNE_IDLE_DURATION") {
       console.log(`[Arachne] 這個分頁閒置了 ${msg.label}（${msg.idleMs} ms）`);
@@ -316,18 +237,10 @@
     }
   });
 
-  // ── Debug helper ─────────────────────────────────────────────────────────
-  // __arachneDebug() is defined in debug.js (world: MAIN) so DevTools can
-  // call it directly. It fires a CustomEvent that we catch here.
-  //
-  // Usage from DevTools console:
-  //   __arachneDebug(7200)  → simulate 2-hour idle (max density)
-  //   __arachneDebug(300)   → simulate 5-min idle (sparse)
-  //   __arachneDebug(0)     → clear
-
+  // ── Debug listener (from popup or DevTools) ──────────────────────────────
   window.addEventListener("arachne-debug", (e) => {
     const idleMs = e.detail.seconds * 1000;
-    const phase = idleToPhase(idleMs);
+    const phase  = idleToPhase(idleMs);
     console.log(`[Arachne debug] ${e.detail.seconds}s → phase ${phase.toFixed(2)}`);
     drawWeb(idleMs);
   });
