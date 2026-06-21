@@ -76,12 +76,18 @@
 
     // ── Behavioral parameters by lifecycle phase ──────────────────────────
     // phase 0–1: nascent  1–2: prime (peak 1.5)  2–3: degraded  3–4: decayed
-    let maxRings, angleNoiseDeg, skipRate, sagMult, opacity, frameWidth, radialWidth, spiralWidth;
+    //
+    // β is the spiral-radial crossing angle. Convergence requires β > 90°−α/2
+    // where α = inter-radial gap. With ~20 radials α≈18°, β_crit≈81°.
+    // β=85° → each step shrinks radius to ~97.8%, one full circuit to ~64%.
+    // Lowering β toward β_crit slows convergence (fewer rings before stopping).
+    let betaBaseDeg, angleNoiseDeg, skipRate, sagMult, opacity,
+        frameWidth, radialWidth, spiralWidth;
 
     if (phase < 1) {
       const t = phase;
-      maxRings      = Math.round(3 + t * 3);          // 3→6
-      angleNoiseDeg = 4;
+      betaBaseDeg   = 83.5;                           // slow convergence → sparse rings
+      angleNoiseDeg = 5;
       skipRate      = 0.05;
       sagMult       = 1;
       opacity       = 0.06 + t * 0.08;
@@ -91,7 +97,7 @@
     } else if (phase < 2) {
       const t = phase - 1;                            // 0→1, peak at 0.5
       const bell = Math.exp(-Math.pow((t - 0.5) / 0.35, 2));
-      maxRings      = Math.round(6 + bell * 12);      // 6→18→6
+      betaBaseDeg   = 85 + bell * 1.5;               // 85→86.5→85: tighter at peak
       angleNoiseDeg = 4 - bell * 2;                   // 4→2→4
       skipRate      = 0.05 - bell * 0.03;             // 5%→2%→5%
       sagMult       = 1;
@@ -101,7 +107,7 @@
       spiralWidth   = 0.6 + bell * 0.4;
     } else if (phase < 3) {
       const t = phase - 2;
-      maxRings      = Math.round(11 - t * 3);         // 11→8
+      betaBaseDeg   = 85 - t * 3;                    // 85→82: looser, fewer rings
       angleNoiseDeg = 4 + t * 11;                     // 4→15
       skipRate      = 0.05 + t * 0.15;                // 5%→20%
       sagMult       = 1 + t * 1.5;                    // 1→2.5
@@ -111,7 +117,7 @@
       spiralWidth   = 0.55;
     } else {
       const t = Math.min(1, phase - 3);
-      maxRings      = Math.round(8 - t * 5);          // 8→3
+      betaBaseDeg   = 82 - t * 1.5;                  // 82→80.5: near β_crit, very few rings
       angleNoiseDeg = 15 + t * 20;                    // 15→35
       skipRate      = 0.20 + t * 0.30;                // 20%→50%
       sagMult       = 2.5 + t * 3.5;                  // 2.5→6
@@ -121,6 +127,7 @@
       spiralWidth   = 0.45;
     }
 
+    const betaBase      = betaBaseDeg * DEG;
     const angleNoiseRad = angleNoiseDeg * DEG;
 
     // ── Hub: seeded position, upper-biased ───────────────────────────────
@@ -182,92 +189,72 @@
     const maxDist = Math.max(...radials.map(r => r.dist));
 
     // ── Eberhard turnback rule ────────────────────────────────────────────
-    // Spider sits at point Q on radial[i-1]. She looks toward radial[i],
-    // measures how far along it she "should" be to maintain crossing angle β,
-    // then steps there. This is local geometry — no global circles.
+    // Spider at Q on radial[i] steps to radial[i+1] at the distance that
+    // makes the silk cross the radial at angle β. Pure local geometry:
     //
-    // d_next = (Q · e1) + |Q · e2| / tan(β)
-    // where e1 = unit along next radial, e2 = unit perp (toward prev radial).
-    // We work in vectors from hub.
+    //   d_next = (Q·e1) + |Q·e2| / tan(β)
+    //
+    // where e1 = unit along next radial, e2 = unit perp to next radial.
+    // For β > 90°−α/2 (α = inter-radial gap), d_next < |Q| → natural inward spiral.
     function turnbackDist(prevDist, prevAngle, nextAngle, beta) {
-      // Q = spider position on prevRadial (dist from hub = prevDist)
-      const Qx = Math.cos(prevAngle) * prevDist;
-      const Qy = Math.sin(prevAngle) * prevDist;
-      // e1 = unit vector along nextRadial
+      const Qx  = Math.cos(prevAngle) * prevDist;
+      const Qy  = Math.sin(prevAngle) * prevDist;
       const e1x = Math.cos(nextAngle), e1y = Math.sin(nextAngle);
-      // dot product Q · e1
       const Qe1 = Qx * e1x + Qy * e1y;
-      // e2 = unit perpendicular to nextRadial pointing toward prevRadial side
-      // (just rotate e1 by ±90° — pick the sign whose dot with Q is positive)
-      const e2xa = -e1y, e2ya = e1x;
-      const Qe2 = Math.abs(Qx * e2xa + Qy * e2ya);
-      const d = Qe1 + Qe2 / Math.tan(beta);
-      return Math.max(4, d);
+      const Qe2 = Math.abs(-Qx * e1y + Qy * e1x);   // |Q × e1|, perp component
+      return Math.max(4, Qe1 + Qe2 / Math.tan(beta));
     }
 
-    // ── Build sticky spiral via spider walk ───────────────────────────────
-    // Spider starts near outermost reachable point on radial[0], walks inward
-    // ring by ring. Each ring is one lap around all radials.
+    // ── Continuous spider walk (no outer ring loop) ───────────────────────
+    // Spider starts near the shortest radial's tip and walks continuously.
+    // Convergence is the natural result of β > β_crit; we stop when the
+    // spider reaches the hub zone (curDist < maxDist * 0.05) or after a
+    // safety-cap of N * 40 steps (prevents infinite loop if β ≈ β_crit).
+    const minDist  = Math.min(...radials.map(r => r.dist));
+    let curDist    = minDist * (0.82 + rand() * 0.12);
+    let curIdx     = 0;
+    const stopDist = maxDist * 0.05;
+    const maxSteps = N * 40;
 
-    // Initial position: spider drops to ~90% of shortest radial
-    const minDist = Math.min(...radials.map(r => r.dist));
-    let curDist = minDist * (0.82 + rand() * 0.12);
-    let curIdx  = 0;
+    const spiralSegments = [];
 
-    // Target crossing angle β ≈ 75° for real orb weavers
-    const betaBase = 75 * DEG;
+    for (let step = 0; step < maxSteps; step++) {
+      const i     = curIdx % N;
+      const iNext = (i + 1) % N;
+      const radCur  = radials[i];
+      const radNext = radials[iNext];
 
-    const spiralSegments = []; // { x1,y1, x2,y2, sag }
+      const x1 = hubX + Math.cos(radCur.angle) * curDist;
+      const y1 = hubY + Math.sin(radCur.angle) * curDist;
 
-    for (let ring = 0; ring < maxRings; ring++) {
-      // One full lap
-      for (let step = 0; step < N; step++) {
-        const i    = (curIdx + step) % N;
-        const iNext = (i + 1) % N;
-        const radCur  = radials[i];
-        const radNext = radials[iNext];
+      // Consume 2 rand() slots regardless of skip, keeping sequence stable
+      const skipRoll = rand();
+      const noiseVal = randn(rand);
 
-        // Spider's current position
-        const x1 = hubX + Math.cos(radCur.angle) * curDist;
-        const y1 = hubY + Math.sin(radCur.angle) * curDist;
+      // Apply noisy β; on a skip we still advance curDist via β_base
+      const beta     = betaBase + noiseVal * angleNoiseRad;
+      let nextDist   = turnbackDist(curDist, radCur.angle, radNext.angle,
+                                    skipRoll < skipRate ? betaBase : beta);
+      nextDist = Math.min(nextDist, radNext.dist * 0.96);
+      nextDist = Math.max(4, nextDist);
 
-        // Skip (torn spiral)
-        const skipRoll = rand();
-        if (skipRoll < skipRate) {
-          // Consume angle noise slot for stability
-          rand();
-          curDist = turnbackDist(curDist, radCur.angle, radNext.angle, betaBase);
-          curDist = Math.min(curDist, radNext.dist * 0.96);
-          curIdx  = iNext;
-          continue;
-        }
-
-        // Noisy crossing angle
-        const beta = betaBase + randn(rand) * angleNoiseRad;
-        let nextDist = turnbackDist(curDist, radCur.angle, radNext.angle, beta);
-        nextDist = Math.min(nextDist, radNext.dist * 0.96);
-        nextDist = Math.max(4, nextDist);
-
+      if (skipRoll >= skipRate) {
         const x2 = hubX + Math.cos(radNext.angle) * nextDist;
         const y2 = hubY + Math.sin(radNext.angle) * nextDist;
 
-        // Catenary sag outward from hub
         const midAngle = (radCur.angle + radNext.angle) / 2;
-        const avgDist  = (curDist + nextDist) / 2;
         const span     = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
         const sagAmt   = span * 0.04 * sagMult * (0.7 + rand() * 0.6);
         const ox = Math.cos(midAngle) * sagAmt;
         const oy = Math.sin(midAngle) * sagAmt;
-
         spiralSegments.push({ x1, y1, x2, y2, ox, oy });
-
-        curDist = nextDist;
-        curIdx  = iNext;
+      } else {
+        rand(); // keep sag slot consumed for skipped steps too
       }
 
-      // Spiral inward: reduce distance before next lap
-      curDist *= 0.78 + rand() * 0.08;
-      if (curDist < maxDist * 0.04) break;
+      curDist = nextDist;
+      curIdx  = iNext;
+      if (curDist <= stopDist) break;
     }
 
     // ── Drawing ───────────────────────────────────────────────────────────
