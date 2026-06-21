@@ -13,5 +13,9 @@
       "run_at": "document_idle"
     }
   ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Arachne"
+  },
   "permissions": ["storage"]
 }
