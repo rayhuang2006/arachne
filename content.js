@@ -151,23 +151,13 @@
   });
 
   // ── Debug helper ─────────────────────────────────────────────────────────
-  // Content scripts run in an isolated world, so window.* set here is not
-  // visible in DevTools. We inject a tiny <script> into the page's main
-  // world that dispatches a CustomEvent, then listen for it here.
+  // __arachneDebug() is defined in debug.js (world: MAIN) so DevTools can
+  // call it directly. It fires a CustomEvent that we catch here.
   //
   // Usage from DevTools console:
   //   __arachneDebug(7200)  → simulate 2-hour idle (max density)
   //   __arachneDebug(300)   → simulate 5-min idle (sparse)
   //   __arachneDebug(0)     → clear
-
-  const debugScript = document.createElement("script");
-  debugScript.textContent = `
-    window.__arachneDebug = function(seconds) {
-      window.dispatchEvent(new CustomEvent("arachne-debug", { detail: { seconds } }));
-    };
-  `;
-  (document.head || document.documentElement).appendChild(debugScript);
-  debugScript.remove();
 
   window.addEventListener("arachne-debug", (e) => {
     const idleMs = e.detail.seconds * 1000;
