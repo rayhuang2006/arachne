@@ -64,79 +64,130 @@
     const seed = hashSeed(location.hostname || "newtab");
     const rand = mulberry32(seed);
 
-    // Anchor corner: determined by seed, stable per hostname
+    // ── Corner & anchor ───────────────────────────────────────────────────
     const cornerIndex = Math.floor(rand() * 4);
     const HALF_PI = Math.PI / 2;
     const corners = [
-      { x: 0, y: 0, a0: 0,            a1: HALF_PI },      // top-left
-      { x: W, y: 0, a0: HALF_PI,      a1: Math.PI },       // top-right
-      { x: W, y: H, a0: Math.PI,      a1: 3 * HALF_PI },   // bottom-right
-      { x: 0, y: H, a0: 3 * HALF_PI, a1: 2 * Math.PI },   // bottom-left
+      { x: 0, y: 0, a0: 0,           a1: HALF_PI },
+      { x: W, y: 0, a0: HALF_PI,     a1: Math.PI },
+      { x: W, y: H, a0: Math.PI,     a1: 3 * HALF_PI },
+      { x: 0, y: H, a0: 3 * HALF_PI, a1: 2 * Math.PI },
     ];
-    const { x: ax, y: ay, a0, a1 } = corners[cornerIndex];
+    const { x: cx, y: cy, a0, a1 } = corners[cornerIndex];
 
-    // Number of radials (spokes) and rings scales with density
-    const N = Math.max(3, Math.round(3 + density * 13));  // 3 – 16
-    const M = Math.max(1, Math.round(1 + density * 11));  // 1 – 12
+    // Offset anchor slightly inward so the hub isn't pixel-perfect at the corner
+    const offsetDist = 10 + rand() * 20;
+    const offsetAngle = (a0 + a1) / 2;
+    const ax = cx + Math.cos(offsetAngle) * offsetDist;
+    const ay = cy + Math.sin(offsetAngle) * offsetDist;
+
+    // ── Structure counts ──────────────────────────────────────────────────
+    const N = Math.max(3, Math.round(3 + density * 13));   // 3 – 16 radials
+    const M = Math.max(1, Math.round(1 + density * 11));   // 1 – 12 rings
 
     const maxRadius = Math.min(W, H) * (0.30 + density * 0.30);
 
-    // Radial angles: evenly spaced across the 90° arc with small jitter
+    // ── Radial angles: uneven spacing, larger jitter ──────────────────────
     const span = a1 - a0;
     const angles = [];
     for (let i = 0; i < N; i++) {
       const base = a0 + (i / (N - 1)) * span;
-      const jitter = (rand() - 0.5) * (span / (N - 1)) * 0.25;
+      const jitter = (rand() - 0.5) * (span / (N - 1)) * 0.45;
       angles.push(base + jitter);
     }
     angles.sort((a, b) => a - b);
 
-    // Ring radii with slight noise so they're not perfectly concentric
+    // Per-radial length variation: some spokes stop short
+    const radialLengths = angles.map(() => {
+      const cutShort = rand() < 0.15 + (1 - density) * 0.25;
+      return cutShort ? (0.5 + rand() * 0.4) * maxRadius : maxRadius;
+    });
+
+    // ── Ring radii: non-linear spacing, vary gap sizes ────────────────────
     const radii = [];
+    let r = 0;
     for (let j = 0; j < M; j++) {
-      const base = maxRadius * ((j + 1) / M);
-      const jitter = (rand() - 0.5) * (maxRadius / M) * 0.15;
-      radii.push(Math.max(8, base + jitter));
+      // Gaps are wider near center, tighter mid-web — like real orb weavers
+      const progress = (j + 1) / M;
+      const gapBase = maxRadius * (0.6 * Math.pow(progress, 0.7) + 0.4 * progress) / M * M;
+      const jitter = (rand() - 0.5) * (maxRadius / M) * 0.35;
+      r = Math.max(r + 12, gapBase + jitter);
+      if (r > maxRadius) break;
+      radii.push(r);
     }
 
-    // Opacity scales with density: very faint at low density
-    const opacity = 0.06 + density * 0.24;  // 0.06 – 0.30
-    ctx.strokeStyle = `rgba(160, 160, 160, ${opacity})`;
-    ctx.lineWidth = 0.7 + density * 0.6;    // 0.7 – 1.3 px
+    // ── Opacity & base styles ─────────────────────────────────────────────
+    const baseOpacity = 0.06 + density * 0.24;
     ctx.lineCap = "round";
 
-    // Draw radials
-    for (const angle of angles) {
+    // ── Draw radials (frame silk — thicker, more opaque) ──────────────────
+    ctx.strokeStyle = `rgba(155, 150, 140, ${baseOpacity})`;
+    ctx.lineWidth = 1.2 + density * 0.9;
+
+    for (let i = 0; i < angles.length; i++) {
+      const len = radialLengths[i];
       ctx.beginPath();
       ctx.moveTo(ax, ay);
-      ctx.lineTo(
-        ax + Math.cos(angle) * maxRadius,
-        ay + Math.sin(angle) * maxRadius,
-      );
+      ctx.lineTo(ax + Math.cos(angles[i]) * len, ay + Math.sin(angles[i]) * len);
       ctx.stroke();
     }
 
-    // Draw spiral rings: connect adjacent radial-ring intersection points
-    for (const r of radii) {
+    // ── Draw spiral rings (capture silk — finer, slightly transparent) ────
+    ctx.strokeStyle = `rgba(155, 150, 140, ${baseOpacity * 0.65})`;
+    ctx.lineWidth = 0.5 + density * 0.55;
+
+    // Probability a segment is missing (tear/gap): higher at low density
+    const tearChance = 0.28 * (1 - density) + 0.04;
+
+    for (const ringR of radii) {
+      // Occasionally skip an entire ring at low density
+      if (rand() < (1 - density) * 0.18) continue;
+
       ctx.beginPath();
+      let penDown = false;
+
       for (let i = 0; i < angles.length; i++) {
-        const px = ax + Math.cos(angles[i]) * r;
-        const py = ay + Math.sin(angles[i]) * r;
-        if (i === 0) {
-          ctx.moveTo(px, py);
-        } else {
-          // Slight inward quadratic curve for a more organic look
-          const prev = angles[i - 1];
-          const midAngle = (prev + angles[i]) / 2;
-          const cpR = r * 0.92;
-          ctx.quadraticCurveTo(
-            ax + Math.cos(midAngle) * cpR,
-            ay + Math.sin(midAngle) * cpR,
-            px,
-            py,
-          );
+        // Only draw to this radial if the spoke reaches this ring
+        if (ringR > radialLengths[i]) {
+          penDown = false;
+          continue;
         }
+
+        const px = ax + Math.cos(angles[i]) * ringR;
+        const py = ay + Math.sin(angles[i]) * ringR;
+
+        if (!penDown) {
+          ctx.moveTo(px, py);
+          penDown = true;
+          continue;
+        }
+
+        // Random tear: lift pen and skip this segment
+        if (rand() < tearChance) {
+          ctx.moveTo(px, py);
+          continue;
+        }
+
+        // Catenary-like sag: cubic bezier with outward-bowed control points
+        const prev = angles[i - 1];
+        const cur  = angles[i];
+        const p0x = ax + Math.cos(prev) * ringR;
+        const p0y = ay + Math.sin(prev) * ringR;
+
+        // Control points at 1/3 and 2/3 along chord, displaced outward
+        const sagAmount = (ringR / maxRadius) * (8 + rand() * 10);
+        const midAngle  = (prev + cur) / 2;
+        const outX = Math.cos(midAngle);
+        const outY = Math.sin(midAngle);
+
+        const cp1x = p0x * 2/3 + px * 1/3 + outX * sagAmount;
+        const cp1y = p0y * 2/3 + py * 1/3 + outY * sagAmount;
+        const cp2x = p0x * 1/3 + px * 2/3 + outX * sagAmount;
+        const cp2y = p0y * 1/3 + py * 2/3 + outY * sagAmount;
+
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, px, py);
       }
+
       ctx.stroke();
     }
   }
