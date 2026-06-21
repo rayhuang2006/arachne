@@ -151,15 +151,28 @@
   });
 
   // ── Debug helper ─────────────────────────────────────────────────────────
+  // Content scripts run in an isolated world, so window.* set here is not
+  // visible in DevTools. We inject a tiny <script> into the page's main
+  // world that dispatches a CustomEvent, then listen for it here.
+  //
   // Usage from DevTools console:
   //   __arachneDebug(7200)  → simulate 2-hour idle (max density)
   //   __arachneDebug(300)   → simulate 5-min idle (sparse)
   //   __arachneDebug(0)     → clear
 
-  window.__arachneDebug = function (seconds) {
-    const idleMs = seconds * 1000;
+  const debugScript = document.createElement("script");
+  debugScript.textContent = `
+    window.__arachneDebug = function(seconds) {
+      window.dispatchEvent(new CustomEvent("arachne-debug", { detail: { seconds } }));
+    };
+  `;
+  (document.head || document.documentElement).appendChild(debugScript);
+  debugScript.remove();
+
+  window.addEventListener("arachne-debug", (e) => {
+    const idleMs = e.detail.seconds * 1000;
     const density = idleToDensity(idleMs);
-    console.log(`[Arachne debug] ${seconds}s → density ${density.toFixed(3)}`);
+    console.log(`[Arachne debug] ${e.detail.seconds}s → density ${density.toFixed(3)}`);
     drawWeb(idleMs);
-  };
+  });
 })();
