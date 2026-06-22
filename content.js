@@ -96,13 +96,15 @@
     return n;
   }
 
-  function addSpring(a, b, width) {
+  // kind: "frame" (thick radial scaffold) | "ring" | "brace" (fine threads)
+  function addSpring(a, b, width, kind) {
     const dx = a.x - b.x, dy = a.y - b.y;
     world.springs.push({
       a, b,
       rest: Math.sqrt(dx * dx + dy * dy),
       broken: false,
       width: width || 0.8,
+      kind: kind || "ring",
     });
   }
 
@@ -118,6 +120,7 @@
 
     // Center stays clear: cap reach so webs hug the corners.
     const maxReach = Math.min(W * 0.46, H * 0.46, Math.min(W, H) * (0.22 + phase * 0.07));
+    world.maxReach = maxReach;
 
     // How many corners have grown in, by maturity.
     const numActive = Math.min(4, Math.floor(phase) + 1);
@@ -145,12 +148,18 @@
   }
 
   // One corner: an anchor at the vertex, several radials pinned to the walls,
-  // nodes sampled along each radial, and rings tying neighbouring radials.
+  // and short ring + brace threads woven between neighbouring radials so the
+  // web reads as a taut triangulated mesh — dense near the corner, sparse and
+  // faint toward the centre.
   function buildCorner(def, cp, maxReach, rand) {
     const spread     = maxReach * (0.45 + cp * 0.55);
-    const numRadials = Math.max(3, Math.round(3 + cp * 3 + rand() * 1.5));
+    const numRadials = Math.max(4, Math.round(4 + cp * 3 + rand() * 1.5));
     const fanSpan    = def.a1 - def.a0;
-    const nodesPer   = 4; // sample points along each radial (excludes the corner)
+    const nodesPer   = 6; // sample points along each radial (excludes the corner)
+
+    // Keep ring/brace threads short: anything longer than this is dropped, so
+    // the web never spans a long straight line across diverging radials.
+    const maxSeg = maxReach * 0.30;
 
     // The shared corner vertex is a fixed anchor.
     const corner = addNode(def.x, def.y, true);
@@ -170,7 +179,9 @@
     const reaches = angles.map(() =>
       spread * (0.35 + Math.pow(rand(), 0.6) * 0.65));
 
-    // Build each radial as a chain of nodes; outer tip pinned to the wall.
+    // Build each radial as a chain of nodes. Spacing is biased toward the
+    // corner (exponent > 1) so rings cluster densely near the vertex and
+    // thin out toward the tip. Outer tip is pinned to the wall.
     const radials = [];
     for (let k = 0; k < angles.length; k++) {
       const angle = angles[k];
@@ -178,28 +189,40 @@
       const chain = [corner];
       let prev = corner;
       for (let s = 1; s <= nodesPer; s++) {
-        const frac = s / nodesPer;
+        const frac = Math.pow(s / nodesPer, 1.5);
         const x = def.x + Math.cos(angle) * reach * frac;
         const y = def.y + Math.sin(angle) * reach * frac;
         const isTip = s === nodesPer;
         const node = addNode(x, y, isTip); // outer tip anchored to the wall
-        addSpring(prev, node, 1.3 + cp * 0.7);
+        addSpring(prev, node, 1.2 + cp * 0.8, "frame");
         prev = node;
         chain.push(node);
       }
       radials.push(chain);
     }
 
-    // Rings: connect node s of one radial to node s of the next, with gaps.
-    const numRings = Math.min(nodesPer, Math.max(2, Math.round(2 + cp * 2)));
-    const baseSkip = 0.15 + (1 - cp) * 0.18;
+    // Helper: a thread only exists if both ends are within maxSeg of each other.
+    const tryThread = (a, b, width, kind, skip) => {
+      if (!a || !b) return;
+      if (rand() < skip) return;
+      const dx = a.x - b.x, dy = a.y - b.y;
+      if (dx * dx + dy * dy > maxSeg * maxSeg) return;
+      addSpring(a, b, width, kind);
+    };
+
+    // Weave between each pair of neighbouring radials: a ring at each level
+    // plus a diagonal brace forming triangles. Density falls off outward
+    // (rising skip with ring index r) so the centre-facing edge stays open.
     for (let k = 0; k < radials.length - 1; k++) {
-      for (let r = 1; r <= numRings; r++) {
-        const outerBias = (r / nodesPer) * 0.25;
-        if (rand() < baseSkip + outerBias) continue;
-        const a = radials[k][r];
-        const b = radials[k + 1][r];
-        if (a && b) addSpring(a, b, 0.7);
+      const A = radials[k], B = radials[k + 1];
+      for (let r = 1; r <= nodesPer; r++) {
+        const outward = r / nodesPer;          // 0 near corner → 1 at tip
+        const ringSkip  = 0.10 + (1 - cp) * 0.15 + outward * 0.45;
+        const braceSkip = 0.35 + (1 - cp) * 0.15 + outward * 0.45;
+        // Ring: same level across the gap.
+        tryThread(A[r], B[r], 0.7, "ring", ringSkip);
+        // Brace: diagonal to the previous level → triangles with the rings.
+        tryThread(A[r], B[r - 1], 0.5, "brace", braceSkip);
       }
     }
   }
@@ -252,9 +275,17 @@
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     const baseAlpha = world.params.opacity;
+    const lenRef = (world.maxReach || 300) * 0.5;
     for (const s of world.springs) {
       if (s.broken) continue;
-      ctx.strokeStyle = `rgba(200, 195, 180, ${baseAlpha})`;
+      // Layering: short threads read clearly, long ones fade out. The frame
+      // scaffold keeps more of its weight than fine ring/brace threads.
+      const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      const shortness = 1 - Math.min(1, len / lenRef);
+      const kindMul = s.kind === "frame" ? 1.0 : s.kind === "ring" ? 0.8 : 0.6;
+      const alpha = baseAlpha * (0.30 + 0.70 * shortness) * kindMul;
+      ctx.strokeStyle = `rgba(200, 195, 180, ${alpha})`;
       ctx.lineWidth = s.width;
       ctx.beginPath();
       ctx.moveTo(s.a.x, s.a.y);
