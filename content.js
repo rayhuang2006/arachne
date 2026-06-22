@@ -144,20 +144,12 @@
     const seed = hashSeed(location.hostname || "newtab");
     const rand = mulberry32(seed);
 
-    // Center stays clear: cap reach so webs hug the corners (fixed, mature size).
-    const maxReach = Math.min(W * 0.46, H * 0.46, Math.min(W, H) * 0.50);
+    // Edge bands: the web hugs the ceiling and the two side walls (an ∩ band),
+    // leaving the centre rectangle and the whole floor clear.
+    const maxReach = Math.min(W * 0.34, H * 0.34); // for grime/dust/fade reference
     world.maxReach = maxReach;
 
-    // Room model: webs only in the two TOP corners (ceiling), hanging down.
-    // The second corner is born later (cornerBase offset) so the web "spreads".
-    const topCorners = [
-      { x: 0, y: 0, dirX:  1, dirY: 1 }, // top-left
-      { x: W, y: 0, dirX: -1, dirY: 1 }, // top-right
-    ];
-    const webOrder = rand() < 0.5 ? [0, 1] : [1, 0];
-    for (let ci = 0; ci < 2; ci++) {
-      buildTopCornerWeb(topCorners[webOrder[ci]], ci * 0.9, maxReach, rand);
-    }
+    buildCeilingWeb(W, H, rand);
 
     // Grime/vignette + dust in all four corners; floor weighted heavier.
     world.grimeCorners = [
@@ -213,117 +205,154 @@
     }
   }
 
-  // A top-corner cobweb. Every anchor sits on a real wall (the corner vertex,
-  // plus a "bridge" thread whose two ends are pinned to the top edge and the
-  // side edge). Radials fan from the vertex out to the sagging bridge; rings
-  // and braces weave between them. Nothing is pinned in mid-air, and because
-  // the bridge and radials all hang below their anchors, every droop runs with
-  // gravity — never against it.
-  // Build one top-corner cobweb at FULL maturity. `cornerBase` shifts this
-  // corner's whole lifecycle later in phase (so corner 2 grows in after 1).
-  // Threads are tagged with birth (scaffold first, fine threads fill in) and a
-  // subset with breakAt (they snap during decay, spawning a dangling stub).
-  function buildTopCornerWeb(def, cornerBase, maxReach, rand) {
-    const spread     = maxReach * 1.0;
-    const numRadials = Math.max(5, Math.round(6 + rand() * 2));
-    const nodesPer   = 5; // segments from the vertex out to the bridge
-    const maxSeg     = maxReach * 0.32;
+  // The ceiling web. Anchors run along the ∩-shaped perimeter (top edge + the
+  // upper part of both side walls — never the floor). Festoons/swags drape
+  // inward and downward from those wall anchors; cross threads weave them into a
+  // mesh; the two top corners keep a small fan for identity. birth grows with
+  // (distance from the nearest top corner) + (depth into the room), so the web
+  // starts as two small corner clumps and spreads across the ceiling and down
+  // the walls, deepening inward — every droop runs with gravity, none upward.
+  function buildCeilingWeb(W, H, rand) {
+    const topDepth   = Math.min(H * 0.32, world.maxReach);
+    const sideDepth  = Math.min(W * 0.32, world.maxReach);
+    const wallBottom = Math.min(H * 0.58, H - 2); // side anchors stop above floor
+    const dMax       = Math.max(W / 2, wallBottom);
+    const maxSeg     = Math.max(topDepth, sideDepth) * 0.9;
 
-    // Corner vertex: fixed anchor where the two walls meet.
-    const V = addNode(def.x, def.y, true);
+    // birth from spread-distance + depth into the room.
+    const birthFor = (dCorner, depth) =>
+      Math.max(0, Math.min(4,
+        4 * (0.55 * (dCorner / dMax) + 0.45 * depth) + (rand() - 0.5) * 0.4));
 
-    // ── Bridge: top-edge anchor ── … ── side-edge anchor (both on walls) ──
-    const dT = spread * (0.75 + rand() * 0.25);
-    const dS = spread * (0.75 + rand() * 0.25);
-    const topAnchor  = addNode(def.x + def.dirX * dT, 0, true);
-    const sideAnchor = addNode(def.x, def.dirY * dS, true);
+    // Inward normal at a point on the perimeter (points into the room).
+    const inwardAt = (x, y) => {
+      let ix = 0, iy = 0;
+      if (x < 1) ix = 1; else if (x > W - 1) ix = -1;
+      if (y < 1) iy = 1;
+      const m = Math.hypot(ix, iy) || 1;
+      return { x: ix / m, y: iy / m };
+    };
 
-    const bridge = [topAnchor];
-    const interiorCount = numRadials - 2;
-    for (let i = 1; i <= interiorCount; i++) {
-      const f = i / (interiorCount + 1);
-      bridge.push(addNode(
-        topAnchor.x + (sideAnchor.x - topAnchor.x) * f,
-        topAnchor.y + (sideAnchor.y - topAnchor.y) * f,
-        false,
-      ));
+    // ── Rail anchors, ordered left-wall(bottom→top) → top → right-wall(top→bottom).
+    // dCorner = distance along the edge from the nearest top corner.
+    const rail = [];
+    const nLeft = Math.max(2, Math.round(wallBottom / 150));
+    for (let i = nLeft; i >= 1; i--) {
+      const y = wallBottom * (i / nLeft);
+      rail.push({ node: addNode(0, y, true), dCorner: y });
     }
-    bridge.push(sideAnchor);
-    // Bridge frame is the first thing strung (birth ~ cornerBase), never breaks.
-    for (let i = 0; i < bridge.length - 1; i++) {
-      addSpring(bridge[i], bridge[i + 1], 1.4, "frame", cornerBase + 0.05);
+    rail.push({ node: addNode(0, 0, true), dCorner: 0 });          // top-left corner
+    const nTop = Math.max(3, Math.round(W / 200));
+    for (let i = 1; i < nTop; i++) {
+      const x = W * (i / nTop);
+      rail.push({ node: addNode(x, 0, true), dCorner: Math.min(x, W - x) });
+    }
+    rail.push({ node: addNode(W, 0, true), dCorner: 0 });          // top-right corner
+    const nRight = Math.max(2, Math.round(wallBottom / 150));
+    for (let i = 1; i <= nRight; i++) {
+      const y = wallBottom * (i / nRight);
+      rail.push({ node: addNode(W, y, true), dCorner: y });
     }
 
-    // ── Radials: from the vertex out to every bridge node ──
-    const radials = [];
-    for (let bi = 0; bi < bridge.length; bi++) {
-      const bn = bridge[bi];
-      const chain = [V];
-      let prev = V;
-      for (let s = 1; s <= nodesPer; s++) {
-        const outward = s / nodesPer;
-        const rBirth  = cornerBase + 0.1 + outward * 0.4; // outer parts later
-        if (s === nodesPer) {
-          addSpring(prev, bn, 1.2, "frame", rBirth);
-          chain.push(bn);
-        } else {
-          const f = Math.pow(s / nodesPer, 1.3);
-          const node = addNode(V.x + (bn.x - V.x) * f, V.y + (bn.y - V.y) * f, false);
-          addSpring(prev, node, s === 1 ? 1.2 : 0.8, "frame", rBirth);
-          prev = node;
-          chain.push(node);
-        }
+    // ── Main festoons: a downward/inward-bowing chain between adjacent anchors.
+    const segsPer = 4;
+    const swags = []; // { nodes, dCorner }
+    for (let k = 0; k < rail.length - 1; k++) {
+      const A = rail[k], B = rail[k + 1];
+      const dC = (A.dCorner + B.dCorner) / 2;
+      const ax = A.node.x, ay = A.node.y, bx = B.node.x, by = B.node.y;
+      const span = Math.hypot(bx - ax, by - ay);
+      const nA = inwardAt(ax, ay), nB = inwardAt(bx, by);
+      const inx = (nA.x + nB.x) / 2, iny = (nA.y + nB.y) / 2;
+      const bow = Math.min(span * 0.35, topDepth * 0.55);
+      const birth = birthFor(dC, 0.15);
+
+      const nodes = [A.node];
+      let prev = A.node;
+      for (let s = 1; s < segsPer; s++) {
+        const f = s / segsPer;
+        const k2 = Math.sin(f * Math.PI) * bow; // max bow at the middle
+        const node = addNode(ax + (bx - ax) * f + inx * k2,
+                             ay + (by - ay) * f + iny * k2 + k2 * 0.3, false);
+        addSpring(prev, node, 1.2, "frame", birth);
+        prev = node; nodes.push(node);
       }
-      radials.push(chain);
+      addSpring(prev, B.node, 1.2, "frame", birth);
+      nodes.push(B.node);
+      swags.push({ nodes, dCorner: dC, inx, iny });
     }
 
-    // Helper: skip distant pairs; tag birth + maybe a breakAt (→ dangling stub).
+    // Helper: skip distant pairs; tag birth + maybe breakAt (→ dangling stub).
     const tryThread = (a, b, width, kind, skipChance, birth) => {
-      if (!a || !b) return;
+      if (!a || !b || a === b) return;
       if (rand() < skipChance) return;
       const dx = a.x - b.x, dy = a.y - b.y;
       if (dx * dx + dy * dy > maxSeg * maxSeg) return;
-      // ~55% of fine threads are destined to snap, during the decay phases.
       let breakAt = Infinity;
       if (rand() < 0.55) {
         breakAt = Math.max(birth + 0.4, 2.6 + rand() * 1.4);
-        // When it snaps, a short remnant keeps dangling from one end.
-        addStrand(rand() < 0.5 ? a : b, maxReach * (0.06 + rand() * 0.12),
+        addStrand(rand() < 0.5 ? a : b, Math.max(topDepth, sideDepth) * (0.06 + rand() * 0.12),
                   2 + Math.floor(rand() * 2), rand, breakAt);
       }
       addSpring(a, b, width, kind, birth, breakAt);
     };
 
-    // Weave rings + braces (triangles); fine threads fill in over phases 0.6→3.
-    for (let k = 0; k < radials.length - 1; k++) {
-      const A = radials[k], B = radials[k + 1];
-      for (let r = 1; r < nodesPer; r++) {
-        const outward = r / nodesPer;
-        const birth = cornerBase + 0.6 + outward * 1.4 + rand() * 0.5;
-        tryThread(A[r], B[r],     0.7, "ring",  0.10 + outward * 0.30, birth);
-        tryThread(A[r], B[r - 1], 0.5, "brace", 0.35 + outward * 0.30, birth);
+    // ── Cross threads: weave neighbouring festoons at matching depth (triangles).
+    for (let k = 0; k < swags.length - 1; k++) {
+      const A = swags[k], B = swags[k + 1];
+      const n = Math.min(A.nodes.length, B.nodes.length);
+      for (let r = 1; r < n - 1; r++) {
+        const birth = birthFor((A.dCorner + B.dCorner) / 2, 0.35 + r * 0.05);
+        tryThread(A.nodes[r], B.nodes[r],     0.7, "ring",  0.18, birth);
+        tryThread(A.nodes[r], B.nodes[r - 1], 0.5, "brace", 0.40, birth);
       }
     }
 
-    // Free-standing dangling strands (not from breaks): appear in disrepair/decay.
-    const interior = radials.flatMap((c) => c.slice(1, nodesPer));
-    const numStrands = 5;
-    for (let i = 0; i < numStrands && interior.length; i++) {
-      const from = interior[Math.floor(rand() * interior.length)];
-      const birth = cornerBase + 2.0 + rand() * 1.6;
-      addStrand(from, maxReach * (0.10 + rand() * 0.20),
-                3 + Math.floor(rand() * 3), rand, birth);
+    // ── Second-tier drapes: deeper festoons hanging off the main swag midpoints.
+    for (const sw of swags) {
+      if (sw.nodes.length < 3) continue;
+      if (rand() < 0.45) continue;
+      const mid = sw.nodes[Math.floor(sw.nodes.length / 2)];
+      const drop = Math.min(topDepth, sideDepth) * (0.35 + rand() * 0.4);
+      const birth = birthFor(sw.dCorner, 0.7);
+      addStrand(mid, drop, 3 + Math.floor(rand() * 2), rand, birth);
     }
 
-    // Dust clumps caught at a few interior intersections (appear late).
-    const fluffCount = 3 + Math.floor(rand() * 3);
-    for (let i = 0; i < fluffCount && interior.length; i++) {
+    // ── Corner fans: a few radials from each top corner into the nearest swags,
+    // born earliest so the web reads as starting at the corners.
+    for (const corner of [{ x: 0, y: 0 }, { x: W, y: 0 }]) {
+      const V = rail.find((r) => r.node.x === corner.x && r.node.y === corner.y).node;
+      const near = [];
+      for (const sw of swags) {
+        for (const nd of sw.nodes) {
+          if (nd.pinned) continue;
+          const d = Math.hypot(nd.x - corner.x, nd.y - corner.y);
+          if (d < topDepth * 0.9) near.push(nd);
+        }
+      }
+      for (let i = 0; i < 4 && near.length; i++) {
+        const nd = near[Math.floor(rand() * near.length)];
+        tryThread(V, nd, 0.7, "ring", 0.2, 0.1 + rand() * 0.3);
+      }
+    }
+
+    // ── Free dangling strands + dust fluff on interior nodes (appear later).
+    const interior = [];
+    for (const sw of swags) for (const nd of sw.nodes) if (!nd.pinned) interior.push(nd);
+    for (let i = 0; i < 8 && interior.length; i++) {
+      const from = interior[Math.floor(rand() * interior.length)];
+      const dC = Math.min(from.x, W - from.x, from.y); // rough spread distance
+      addStrand(from, Math.max(topDepth, sideDepth) * (0.12 + rand() * 0.22),
+                3 + Math.floor(rand() * 3), rand, birthFor(dC, 0.8));
+    }
+    for (let i = 0; i < 10 && interior.length; i++) {
       const node = interior[Math.floor(rand() * interior.length)];
+      const dC = Math.min(node.x, W - node.x, node.y);
       world.fluff.push({
         node,
         r: 1.5 + rand() * 2.5,
         a: 0.10 + rand() * 0.12,
-        birth: cornerBase + 2.2 + rand() * 1.4,
+        birth: Math.min(4, birthFor(dC, 0.85) + 0.4),
       });
     }
   }
