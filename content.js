@@ -52,14 +52,13 @@
   //   slack        rest-length multiplier (>1 = threads grow loose and droop)
   //   opacity      global stroke alpha
   //   grime        corner shadow + dust-haze intensity (0–1)
-  //   dust         dust-mote density multiplier
-  //   strands      dangling loose-strand count per corner
-  //   breaks       fraction of ring/brace threads snapped (tattered web)
+  // (Dust density, strand count and breakage are no longer params — they are
+  // baked into the structure's birth/breakAt lifecycle, see buildWorld.)
   const PROFILES = [
-    { gravity: 0.018, stiffness: 1.00, iterations: 6, slack: 1.00, opacity: 0.42, grime: 0.00, dust: 0.0, strands: 0, breaks: 0.00 }, // 0 初生
-    { gravity: 0.022, stiffness: 1.00, iterations: 6, slack: 1.00, opacity: 0.52, grime: 0.25, dust: 0.4, strands: 0, breaks: 0.00 }, // 1 繁榮
-    { gravity: 0.075, stiffness: 0.70, iterations: 3, slack: 1.15, opacity: 0.50, grime: 0.60, dust: 1.0, strands: 2, breaks: 0.18 }, // 2 失修
-    { gravity: 0.150, stiffness: 0.45, iterations: 2, slack: 1.40, opacity: 0.46, grime: 1.00, dust: 1.8, strands: 4, breaks: 0.42 }, // 3 腐朽
+    { gravity: 0.018, stiffness: 1.00, iterations: 6, slack: 1.00, opacity: 0.42, grime: 0.00 }, // 0 初生
+    { gravity: 0.022, stiffness: 1.00, iterations: 6, slack: 1.00, opacity: 0.52, grime: 0.25 }, // 1 繁榮
+    { gravity: 0.075, stiffness: 0.70, iterations: 3, slack: 1.15, opacity: 0.50, grime: 0.60 }, // 2 失修
+    { gravity: 0.150, stiffness: 0.45, iterations: 2, slack: 1.40, opacity: 0.46, grime: 1.00 }, // 3 腐朽
   ];
 
   function lerp(a, b, t) { return a + (b - a) * t; }
@@ -76,23 +75,29 @@
       slack:      lerp(A.slack, B.slack, t),
       opacity:    lerp(A.opacity, B.opacity, t),
       grime:      lerp(A.grime, B.grime, t),
-      dust:       lerp(A.dust, B.dust, t),
-      strands:    Math.round(lerp(A.strands, B.strands, t)),
-      breaks:     lerp(A.breaks, B.breaks, t),
     };
   }
 
   // ── Physics world ────────────────────────────────────────────────────────
-  // nodes:   { x, y, px, py, pinned }
-  // springs: { a, b, rest, broken, width }
+  // The web is built ONCE at full maturity (a single canonical structure per
+  // site). Phase then drives a lifecycle over that fixed structure rather than
+  // re-generating it: every thread has a `birth` phase (when it grows in) and a
+  // `breakAt` phase (when it snaps). Scrubbing the phase shows one web grow,
+  // fill in, then decay — not four unrelated snapshots.
+  //   nodes:   { x, y, px, py, pinned, active }
+  //   springs: { a, b, rest, width, kind, birth, breakAt, sag, alive }
   const world = {
     nodes: [],
     springs: [],
-    grimeCorners: [], // [{x, y, reach}] active corners, for the grime/vignette layer
-    dust: [],         // [{x, y, r, a}] static dust motes
+    grimeCorners: [], // [{x, y, reach, floor}] for the grime/vignette layer
+    dust: [],         // [{x, y, r, a, birth}] static dust motes
+    fluff: [],        // [{node, r, a, birth}] dust clumps caught on intersections
     params: paramsForPhase(0),
     phase: 0,
     maxReach: 300,
+    built: false,
+    builtW: 0,
+    builtH: 0,
   };
 
   const DAMPING = 0.98;          // velocity retention per frame
@@ -102,59 +107,59 @@
   const MOUSE_FORCE = 0.35;      // how hard the cursor shoves nearby nodes
 
   function addNode(x, y, pinned) {
-    const n = { x, y, px: x, py: y, pinned: !!pinned };
+    const n = { x, y, px: x, py: y, pinned: !!pinned, active: false };
     world.nodes.push(n);
     return n;
   }
 
-  // kind: "frame" (thick radial scaffold) | "ring" | "brace" (fine threads)
-  function addSpring(a, b, width, kind) {
+  // kind: "frame" (thick scaffold, never breaks) | "ring" | "brace" (fine).
+  // birth: phase at which the thread appears. breakAt: phase at which it snaps
+  // (Infinity = survives). sag is filled in later (deterministic per spring).
+  function addSpring(a, b, width, kind, birth, breakAt) {
     const dx = a.x - b.x, dy = a.y - b.y;
-    world.springs.push({
+    const s = {
       a, b,
       rest: Math.sqrt(dx * dx + dy * dy),
-      broken: false,
       width: width || 0.8,
       kind: kind || "ring",
-    });
+      birth: birth || 0,
+      breakAt: breakAt == null ? Infinity : breakAt,
+      sag: 0,
+      alive: false,
+    };
+    world.springs.push(s);
+    return s;
   }
 
-  // ── Build the corner-web skeleton (geometry → nodes + springs) ───────────
+  // ── Build the full mature web ONCE (deterministic per site) ──────────────
+  // Phase does NOT enter here; everything is built at full maturity and tagged
+  // with birth/breakAt so applyPhase() can reveal/decay it later.
   function buildWorld() {
     world.nodes.length = 0;
     world.springs.length = 0;
-    world.grimeCorners.length = 0;
     world.dust.length = 0;
+    world.fluff.length = 0;
 
     const W = canvas.width, H = canvas.height;
     const seed = hashSeed(location.hostname || "newtab");
     const rand = mulberry32(seed);
-    const phase = world.phase;
 
-    // Center stays clear: cap reach so webs hug the corners.
-    const maxReach = Math.min(W * 0.46, H * 0.46, Math.min(W, H) * (0.22 + phase * 0.07));
+    // Center stays clear: cap reach so webs hug the corners (fixed, mature size).
+    const maxReach = Math.min(W * 0.46, H * 0.46, Math.min(W, H) * 0.50);
     world.maxReach = maxReach;
 
-    // Room model: webs only grow in the two TOP corners (ceiling), hanging
-    // down with gravity. The bottom (floor) only gathers dust — no upward web.
-    // dirX/dirY point from the wall vertex into the room.
+    // Room model: webs only in the two TOP corners (ceiling), hanging down.
+    // The second corner is born later (cornerBase offset) so the web "spreads".
     const topCorners = [
       { x: 0, y: 0, dirX:  1, dirY: 1 }, // top-left
       { x: W, y: 0, dirX: -1, dirY: 1 }, // top-right
     ];
-
-    // Seeded order so a single-corner phase is deterministic per site.
     const webOrder = rand() < 0.5 ? [0, 1] : [1, 0];
-    const numWeb = phase < 1 ? 1 : 2;
-    for (let ci = 0; ci < numWeb; ci++) {
-      const def = topCorners[webOrder[ci]];
-      const cp  = Math.min(1, phase - ci); // this corner's maturity 0→1
-      if (cp <= 0) continue;
-      buildTopCornerWeb(def, cp, maxReach, rand);
+    for (let ci = 0; ci < 2; ci++) {
+      buildTopCornerWeb(topCorners[webOrder[ci]], ci * 0.9, maxReach, rand);
     }
 
-    // Grime/vignette + dust live in all four corners; the bottom (floor) is
-    // weighted heavier so the room reads as ground below, ceiling above.
+    // Grime/vignette + dust in all four corners; floor weighted heavier.
     world.grimeCorners = [
       { x: 0, y: 0, reach: maxReach, floor: false },
       { x: W, y: 0, reach: maxReach, floor: false },
@@ -163,35 +168,46 @@
     ];
 
     seedDust(rand);
+
+    // Deterministic per-spring sag factor (independent PRNG so it never
+    // perturbs the structural rand sequence).
+    const sr = mulberry32(seed ^ 0x9e3779b9);
+    for (const s of world.springs) s.sag = sr();
   }
 
-  // Scatter static dust motes near each active corner. Density follows the
-  // phase `dust` factor; placement is biased to the corner (pow) and skips
-  // outward so the centre stays clean. Deterministic via the shared `rand`.
+  // Reveal/decay the fixed structure for a phase. Marks each spring alive and
+  // each node active; nothing is rebuilt, so scrubbing phase is smooth.
+  function applyPhase(phase) {
+    world.phase = phase;
+    world.params = paramsForPhase(phase);
+    for (const n of world.nodes) n.active = false;
+    for (const s of world.springs) {
+      s.alive = s.birth <= phase && s.breakAt > phase;
+      if (s.alive) { s.a.active = true; s.b.active = true; }
+    }
+  }
+
+  // Static dust motes, built at max density with per-mote birth phases so dust
+  // accumulates over time. Floor corners get more, biased along the bottom edge.
   function seedDust(rand) {
-    const density = world.params.dust;
-    if (density <= 0) return;
     for (const c of world.grimeCorners) {
-      // Floor corners gather noticeably more dust than ceiling corners.
-      const count = Math.round(40 * density * (c.floor ? 1.7 : 0.6));
+      const count = Math.round(c.floor ? 90 : 32);
       const dirX = c.x === 0 ? 1 : -1;
       const dirY = c.y === 0 ? 1 : -1;
       for (let i = 0; i < count; i++) {
-        // Sample a point inside the corner's quadrant, biased toward the vertex.
         const t   = Math.pow(rand(), 1.7);          // 0 corner → 1 outward
         const rad = t * c.reach;
-        // Floor dust hugs the bottom edge (shallow angle); ceiling dust spreads.
         const spreadAng = c.floor
           ? rand() * (Math.PI / 2) * 0.55          // bias toward horizontal floor
           : rand() * (Math.PI / 2);
         const x = c.x + dirX * Math.cos(spreadAng) * rad;
         const y = c.y + dirY * Math.sin(spreadAng) * rad;
-        // Skip more often toward the centre → corner stays denser.
-        if (rand() < t * 0.7) continue;
+        if (rand() < t * 0.7) continue;            // centre stays clean
         world.dust.push({
           x, y,
           r: 0.5 + rand() * 1.0,
           a: 0.10 + rand() * 0.18,
+          birth: 1.0 + rand() * 3.0,               // dust creeps in over time
         });
       }
     }
@@ -203,10 +219,13 @@
   // and braces weave between them. Nothing is pinned in mid-air, and because
   // the bridge and radials all hang below their anchors, every droop runs with
   // gravity — never against it.
-  function buildTopCornerWeb(def, cp, maxReach, rand) {
-    const startSpring = world.springs.length; // for per-corner break selection
-    const spread     = maxReach * (0.55 + cp * 0.45);
-    const numRadials = Math.max(4, Math.round(4 + cp * 3 + rand() * 1.5));
+  // Build one top-corner cobweb at FULL maturity. `cornerBase` shifts this
+  // corner's whole lifecycle later in phase (so corner 2 grows in after 1).
+  // Threads are tagged with birth (scaffold first, fine threads fill in) and a
+  // subset with breakAt (they snap during decay, spawning a dangling stub).
+  function buildTopCornerWeb(def, cornerBase, maxReach, rand) {
+    const spread     = maxReach * 1.0;
+    const numRadials = Math.max(5, Math.round(6 + rand() * 2));
     const nodesPer   = 5; // segments from the vertex out to the bridge
     const maxSeg     = maxReach * 0.32;
 
@@ -214,8 +233,8 @@
     const V = addNode(def.x, def.y, true);
 
     // ── Bridge: top-edge anchor ── … ── side-edge anchor (both on walls) ──
-    const dT = spread * (0.75 + rand() * 0.25); // reach along the top edge
-    const dS = spread * (0.75 + rand() * 0.25); // reach down the side edge
+    const dT = spread * (0.75 + rand() * 0.25);
+    const dS = spread * (0.75 + rand() * 0.25);
     const topAnchor  = addNode(def.x + def.dirX * dT, 0, true);
     const sideAnchor = addNode(def.x, def.dirY * dS, true);
 
@@ -223,30 +242,34 @@
     const interiorCount = numRadials - 2;
     for (let i = 1; i <= interiorCount; i++) {
       const f = i / (interiorCount + 1);
-      const x = topAnchor.x + (sideAnchor.x - topAnchor.x) * f;
-      const y = topAnchor.y + (sideAnchor.y - topAnchor.y) * f;
-      bridge.push(addNode(x, y, false)); // interior bridge nodes are free → sag
+      bridge.push(addNode(
+        topAnchor.x + (sideAnchor.x - topAnchor.x) * f,
+        topAnchor.y + (sideAnchor.y - topAnchor.y) * f,
+        false,
+      ));
     }
     bridge.push(sideAnchor);
+    // Bridge frame is the first thing strung (birth ~ cornerBase), never breaks.
     for (let i = 0; i < bridge.length - 1; i++) {
-      addSpring(bridge[i], bridge[i + 1], 1.0 + cp * 0.6, "frame");
+      addSpring(bridge[i], bridge[i + 1], 1.4, "frame", cornerBase + 0.05);
     }
 
     // ── Radials: from the vertex out to every bridge node ──
-    // Spacing biased toward the vertex (exponent > 1) so the mesh is dense near
-    // the corner and opens up toward the bridge.
     const radials = [];
-    for (const bn of bridge) {
+    for (let bi = 0; bi < bridge.length; bi++) {
+      const bn = bridge[bi];
       const chain = [V];
       let prev = V;
       for (let s = 1; s <= nodesPer; s++) {
+        const outward = s / nodesPer;
+        const rBirth  = cornerBase + 0.1 + outward * 0.4; // outer parts later
         if (s === nodesPer) {
-          addSpring(prev, bn, 1.0 + cp * 0.5, "frame"); // reuse bridge node as the tip
+          addSpring(prev, bn, 1.2, "frame", rBirth);
           chain.push(bn);
         } else {
           const f = Math.pow(s / nodesPer, 1.3);
           const node = addNode(V.x + (bn.x - V.x) * f, V.y + (bn.y - V.y) * f, false);
-          addSpring(prev, node, s === 1 ? 1.0 + cp * 0.5 : 0.8, "frame");
+          addSpring(prev, node, s === 1 ? 1.2 : 0.8, "frame", rBirth);
           prev = node;
           chain.push(node);
         }
@@ -254,60 +277,66 @@
       radials.push(chain);
     }
 
-    // Helper: a thread only exists if both ends are within maxSeg of each other.
-    const tryThread = (a, b, width, kind, skip) => {
+    // Helper: skip distant pairs; tag birth + maybe a breakAt (→ dangling stub).
+    const tryThread = (a, b, width, kind, skipChance, birth) => {
       if (!a || !b) return;
-      if (rand() < skip) return;
+      if (rand() < skipChance) return;
       const dx = a.x - b.x, dy = a.y - b.y;
       if (dx * dx + dy * dy > maxSeg * maxSeg) return;
-      addSpring(a, b, width, kind);
+      // ~55% of fine threads are destined to snap, during the decay phases.
+      let breakAt = Infinity;
+      if (rand() < 0.55) {
+        breakAt = Math.max(birth + 0.4, 2.6 + rand() * 1.4);
+        // When it snaps, a short remnant keeps dangling from one end.
+        addStrand(rand() < 0.5 ? a : b, maxReach * (0.06 + rand() * 0.12),
+                  2 + Math.floor(rand() * 2), rand, breakAt);
+      }
+      addSpring(a, b, width, kind, birth, breakAt);
     };
 
-    // Weave rings + diagonal braces between neighbouring radials (triangles).
-    // Density falls off outward so the centre-facing edge stays open.
+    // Weave rings + braces (triangles); fine threads fill in over phases 0.6→3.
     for (let k = 0; k < radials.length - 1; k++) {
       const A = radials[k], B = radials[k + 1];
-      for (let r = 1; r < nodesPer; r++) { // bridge level already tied by the bridge
+      for (let r = 1; r < nodesPer; r++) {
         const outward = r / nodesPer;
-        const ringSkip  = 0.10 + (1 - cp) * 0.15 + outward * 0.40;
-        const braceSkip = 0.35 + (1 - cp) * 0.15 + outward * 0.40;
-        tryThread(A[r], B[r], 0.7, "ring", ringSkip);
-        tryThread(A[r], B[r - 1], 0.5, "brace", braceSkip);
+        const birth = cornerBase + 0.6 + outward * 1.4 + rand() * 0.5;
+        tryThread(A[r], B[r],     0.7, "ring",  0.10 + outward * 0.30, birth);
+        tryThread(A[r], B[r - 1], 0.5, "brace", 0.35 + outward * 0.30, birth);
       }
     }
 
-    // Decay: snap some of THIS corner's ring/brace threads. Frame is spared so
-    // the web never fully vanishes. Deterministic via the shared `rand`.
-    const breaks = world.params.breaks;
-    if (breaks > 0) {
-      for (let i = startSpring; i < world.springs.length; i++) {
-        const s = world.springs[i];
-        if (s.kind === "frame") continue;
-        if (rand() < breaks) s.broken = true;
-      }
-    }
-
-    // Dangling loose strands: hang straight down from interior web nodes (with
-    // gravity). Strongest "abandoned cobweb" cue; only ever droop downward.
-    const numStrands = world.params.strands;
-    const interior = radials.flatMap((c) => c.slice(1, nodesPer)); // skip vertex & bridge tip
+    // Free-standing dangling strands (not from breaks): appear in disrepair/decay.
+    const interior = radials.flatMap((c) => c.slice(1, nodesPer));
+    const numStrands = 5;
     for (let i = 0; i < numStrands && interior.length; i++) {
       const from = interior[Math.floor(rand() * interior.length)];
-      const segs = 3 + Math.floor(rand() * 3);
-      const len  = maxReach * (0.10 + rand() * 0.20);
-      addStrand(from, len, segs, rand);
+      const birth = cornerBase + 2.0 + rand() * 1.6;
+      addStrand(from, maxReach * (0.10 + rand() * 0.20),
+                3 + Math.floor(rand() * 3), rand, birth);
+    }
+
+    // Dust clumps caught at a few interior intersections (appear late).
+    const fluffCount = 3 + Math.floor(rand() * 3);
+    for (let i = 0; i < fluffCount && interior.length; i++) {
+      const node = interior[Math.floor(rand() * interior.length)];
+      world.fluff.push({
+        node,
+        r: 1.5 + rand() * 2.5,
+        a: 0.10 + rand() * 0.12,
+        birth: cornerBase + 2.2 + rand() * 1.4,
+      });
     }
   }
 
   // A loose strand hangs straight down from `from`; gravity settles it into a
-  // natural droop during the settle pass. Only the attach point is fixed.
-  function addStrand(from, length, segs, rand) {
+  // natural droop. Only the attach point is fixed. All segments share `birth`.
+  function addStrand(from, length, segs, rand, birth) {
     let prev = from;
     const segLen = length / segs;
     for (let s = 1; s <= segs; s++) {
       const jitter = (rand() - 0.5) * segLen * 0.3;
       const node = addNode(from.x + jitter, from.y + segLen * s, false);
-      addSpring(prev, node, 0.5, "brace");
+      addSpring(prev, node, 0.5, "brace", birth || 0);
       prev = node;
     }
   }
@@ -316,9 +345,9 @@
   function step() {
     const { gravity, stiffness, iterations, slack } = world.params;
 
-    // Integrate free nodes.
+    // Integrate free nodes that are part of the currently-alive web.
     for (const n of world.nodes) {
-      if (n.pinned) continue;
+      if (n.pinned || !n.active) continue;
       const vx = (n.x - n.px) * DAMPING;
       const vy = (n.y - n.py) * DAMPING;
       n.px = n.x;
@@ -330,7 +359,7 @@
     // Satisfy distance constraints (several passes for stiffness).
     for (let it = 0; it < iterations; it++) {
       for (const s of world.springs) {
-        if (s.broken) continue;
+        if (!s.alive) continue;
         const a = s.a, b = s.b;
         const dx = b.x - a.x, dy = b.y - a.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1e-6;
@@ -347,7 +376,7 @@
   function kineticEnergy() {
     let e = 0;
     for (const n of world.nodes) {
-      if (n.pinned) continue;
+      if (n.pinned || !n.active) continue;
       const vx = n.x - n.px, vy = n.y - n.py;
       e += vx * vx + vy * vy;
     }
@@ -360,6 +389,7 @@
     drawGrime();
     drawDust();
     drawWeb();
+    drawFluff();
   }
 
   // Layer 1: cool corner shadow + dusty haze. Two radial gradients per active
@@ -388,9 +418,12 @@
     }
   }
 
-  // Layer 2: static dust motes — low-alpha cool-grey specks, no glow.
+  // Layer 2: static dust motes — low-alpha cool-grey specks, no glow. Only
+  // motes whose birth phase has passed are drawn, so dust accumulates.
   function drawDust() {
+    const phase = world.phase;
     for (const d of world.dust) {
+      if (d.birth > phase) continue;
       ctx.fillStyle = `rgba(150, 150, 156, ${d.a})`;
       ctx.beginPath();
       ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
@@ -400,13 +433,16 @@
 
   // Layer 3: the web. Cool-grey threads; short/near read clearly, long/far
   // fade out; frame scaffold keeps more weight than fine ring/brace threads.
+  // Fine threads are drawn as a gentle downward-bowing curve (per-segment sag)
+  // so they read as hanging silk rather than rigid struts.
   function drawWeb() {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     const baseAlpha = world.params.opacity;
     const lenRef = (world.maxReach || 300) * 0.5;
+    const slackBow = 1 + (world.params.slack - 1) * 3; // looser web → deeper bow
     for (const s of world.springs) {
-      if (s.broken) continue;
+      if (!s.alive) continue;
       const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
       const len = Math.sqrt(dx * dx + dy * dy);
       const shortness = 1 - Math.min(1, len / lenRef);
@@ -416,8 +452,27 @@
       ctx.lineWidth = s.width;
       ctx.beginPath();
       ctx.moveTo(s.a.x, s.a.y);
-      ctx.lineTo(s.b.x, s.b.y);
+      if (s.kind === "frame") {
+        ctx.lineTo(s.b.x, s.b.y);
+      } else {
+        // Downward sag at the midpoint, scaled by length, slack and per-thread sag.
+        const bow = len * (0.04 + s.sag * 0.10) * slackBow;
+        ctx.quadraticCurveTo((s.a.x + s.b.x) / 2, (s.a.y + s.b.y) / 2 + bow, s.b.x, s.b.y);
+      }
       ctx.stroke();
+    }
+  }
+
+  // Dust clumps caught on web intersections. Drawn at the node's live position
+  // (so they follow the sagging web) once their birth phase has passed.
+  function drawFluff() {
+    const phase = world.phase;
+    for (const f of world.fluff) {
+      if (f.birth > phase || !f.node.active) continue;
+      ctx.fillStyle = `rgba(140, 140, 146, ${f.a})`;
+      ctx.beginPath();
+      ctx.arc(f.node.x, f.node.y, f.r, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
@@ -457,21 +512,26 @@
     // One last paint so the resting web stays on screen; then CPU goes idle.
   }
 
-  // (Re)build the web for a given idle duration and settle it to equilibrium.
+  // Set the web to a given idle duration. The structure is built once (lazily,
+  // and on resize); phase changes only reveal/decay it, so scrubbing is smooth.
   function rebuild(idleMs) {
-    world.phase = idleToPhase(idleMs);
-    world.params = paramsForPhase(world.phase);
-    buildWorld();
+    const phase = idleToPhase(idleMs);
+    if (!world.built || world.builtW !== canvas.width || world.builtH !== canvas.height) {
+      buildWorld();
+      world.built = true;
+      world.builtW = canvas.width;
+      world.builtH = canvas.height;
+    }
+    applyPhase(phase);
 
-    if (world.phase < 0.05 || world.nodes.length === 0) {
+    if (phase < 0.05) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       sleep();
       return;
     }
 
-    // Animated settle: the web is built taut, then we wake the loop so the
-    // user watches it sag and the dust appear over ~1s before it auto-sleeps
-    // (per the kinetic-energy threshold). Gives a sense of decay creeping in.
+    // Animated settle: built taut, then the loop wakes so the user watches it
+    // sag and dust/threads appear before it auto-sleeps (kinetic-energy gate).
     wake();
   }
 
@@ -499,6 +559,7 @@
   window.addEventListener("resize", () => {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
+    world.built = false; // viewport changed → rebuild the structure
     rebuild(world.lastIdleMs || 0);
   });
 
