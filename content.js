@@ -135,33 +135,33 @@
     const maxReach = Math.min(W * 0.46, H * 0.46, Math.min(W, H) * (0.22 + phase * 0.07));
     world.maxReach = maxReach;
 
-    // How many corners have grown in, by maturity.
-    const numActive = Math.min(4, Math.floor(phase) + 1);
-
-    const order = [0, 1, 2, 3];
-    for (let i = 3; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1));
-      [order[i], order[j]] = [order[j], order[i]];
-    }
-
-    const P2 = Math.PI / 2;
-    const cornerDefs = [
-      { x: 0, y: 0, a0: 0,        a1: P2 },          // top-left
-      { x: W, y: 0, a0: P2,       a1: Math.PI },     // top-right
-      { x: W, y: H, a0: Math.PI,  a1: 3 * P2 },      // bottom-right
-      { x: 0, y: H, a0: 3 * P2,   a1: 2 * Math.PI }, // bottom-left
+    // Room model: webs only grow in the two TOP corners (ceiling), hanging
+    // down with gravity. The bottom (floor) only gathers dust — no upward web.
+    // dirX/dirY point from the wall vertex into the room.
+    const topCorners = [
+      { x: 0, y: 0, dirX:  1, dirY: 1 }, // top-left
+      { x: W, y: 0, dirX: -1, dirY: 1 }, // top-right
     ];
 
-    for (let ci = 0; ci < numActive; ci++) {
-      const def = cornerDefs[order[ci]];
+    // Seeded order so a single-corner phase is deterministic per site.
+    const webOrder = rand() < 0.5 ? [0, 1] : [1, 0];
+    const numWeb = phase < 1 ? 1 : 2;
+    for (let ci = 0; ci < numWeb; ci++) {
+      const def = topCorners[webOrder[ci]];
       const cp  = Math.min(1, phase - ci); // this corner's maturity 0→1
       if (cp <= 0) continue;
-      buildCorner(def, cp, maxReach, rand);
-      // Register this corner for the grime/vignette layer.
-      world.grimeCorners.push({ x: def.x, y: def.y, reach: maxReach });
+      buildTopCornerWeb(def, cp, maxReach, rand);
     }
 
-    // Dust motes: clustered toward the active corners, thinning toward centre.
+    // Grime/vignette + dust live in all four corners; the bottom (floor) is
+    // weighted heavier so the room reads as ground below, ceiling above.
+    world.grimeCorners = [
+      { x: 0, y: 0, reach: maxReach, floor: false },
+      { x: W, y: 0, reach: maxReach, floor: false },
+      { x: W, y: H, reach: maxReach, floor: true },
+      { x: 0, y: H, reach: maxReach, floor: true },
+    ];
+
     seedDust(rand);
   }
 
@@ -172,14 +172,18 @@
     const density = world.params.dust;
     if (density <= 0) return;
     for (const c of world.grimeCorners) {
-      const count = Math.round(40 * density);
+      // Floor corners gather noticeably more dust than ceiling corners.
+      const count = Math.round(40 * density * (c.floor ? 1.7 : 0.6));
       const dirX = c.x === 0 ? 1 : -1;
       const dirY = c.y === 0 ? 1 : -1;
       for (let i = 0; i < count; i++) {
         // Sample a point inside the corner's quadrant, biased toward the vertex.
         const t   = Math.pow(rand(), 1.7);          // 0 corner → 1 outward
         const rad = t * c.reach;
-        const spreadAng = rand() * (Math.PI / 2);
+        // Floor dust hugs the bottom edge (shallow angle); ceiling dust spreads.
+        const spreadAng = c.floor
+          ? rand() * (Math.PI / 2) * 0.55          // bias toward horizontal floor
+          : rand() * (Math.PI / 2);
         const x = c.x + dirX * Math.cos(spreadAng) * rad;
         const y = c.y + dirY * Math.sin(spreadAng) * rad;
         // Skip more often toward the centre → corner stays denser.
@@ -193,56 +197,59 @@
     }
   }
 
-  // One corner: an anchor at the vertex, several radials pinned to the walls,
-  // and short ring + brace threads woven between neighbouring radials so the
-  // web reads as a taut triangulated mesh — dense near the corner, sparse and
-  // faint toward the centre.
-  function buildCorner(def, cp, maxReach, rand) {
-    const spread     = maxReach * (0.45 + cp * 0.55);
+  // A top-corner cobweb. Every anchor sits on a real wall (the corner vertex,
+  // plus a "bridge" thread whose two ends are pinned to the top edge and the
+  // side edge). Radials fan from the vertex out to the sagging bridge; rings
+  // and braces weave between them. Nothing is pinned in mid-air, and because
+  // the bridge and radials all hang below their anchors, every droop runs with
+  // gravity — never against it.
+  function buildTopCornerWeb(def, cp, maxReach, rand) {
+    const startSpring = world.springs.length; // for per-corner break selection
+    const spread     = maxReach * (0.55 + cp * 0.45);
     const numRadials = Math.max(4, Math.round(4 + cp * 3 + rand() * 1.5));
-    const fanSpan    = def.a1 - def.a0;
-    const nodesPer   = 6; // sample points along each radial (excludes the corner)
+    const nodesPer   = 5; // segments from the vertex out to the bridge
+    const maxSeg     = maxReach * 0.32;
 
-    // Keep ring/brace threads short: anything longer than this is dropped, so
-    // the web never spans a long straight line across diverging radials.
-    const maxSeg = maxReach * 0.30;
+    // Corner vertex: fixed anchor where the two walls meet.
+    const V = addNode(def.x, def.y, true);
 
-    // The shared corner vertex is a fixed anchor.
-    const corner = addNode(def.x, def.y, true);
+    // ── Bridge: top-edge anchor ── … ── side-edge anchor (both on walls) ──
+    const dT = spread * (0.75 + rand() * 0.25); // reach along the top edge
+    const dS = spread * (0.75 + rand() * 0.25); // reach down the side edge
+    const topAnchor  = addNode(def.x + def.dirX * dT, 0, true);
+    const sideAnchor = addNode(def.x, def.dirY * dS, true);
 
-    // Uneven radial angles (hug the fan edges, jitter the interior ones).
-    const angles = [];
-    angles.push(def.a0 + rand() * fanSpan * 0.08);
-    angles.push(def.a1 - rand() * fanSpan * 0.08);
-    for (let k = 0; k < numRadials - 2; k++) {
-      const base  = def.a0 + ((k + 1) / (numRadials - 1)) * fanSpan;
-      const noise = (rand() - 0.5) * (fanSpan / (numRadials - 1)) * 0.80;
-      angles.push(base + noise);
+    const bridge = [topAnchor];
+    const interiorCount = numRadials - 2;
+    for (let i = 1; i <= interiorCount; i++) {
+      const f = i / (interiorCount + 1);
+      const x = topAnchor.x + (sideAnchor.x - topAnchor.x) * f;
+      const y = topAnchor.y + (sideAnchor.y - topAnchor.y) * f;
+      bridge.push(addNode(x, y, false)); // interior bridge nodes are free → sag
     }
-    angles.sort((a, b) => a - b);
+    bridge.push(sideAnchor);
+    for (let i = 0; i < bridge.length - 1; i++) {
+      addSpring(bridge[i], bridge[i + 1], 1.0 + cp * 0.6, "frame");
+    }
 
-    // Per-radial reach: many short, some long, organic skew.
-    const reaches = angles.map(() =>
-      spread * (0.35 + Math.pow(rand(), 0.6) * 0.65));
-
-    // Build each radial as a chain of nodes. Spacing is biased toward the
-    // corner (exponent > 1) so rings cluster densely near the vertex and
-    // thin out toward the tip. Outer tip is pinned to the wall.
+    // ── Radials: from the vertex out to every bridge node ──
+    // Spacing biased toward the vertex (exponent > 1) so the mesh is dense near
+    // the corner and opens up toward the bridge.
     const radials = [];
-    for (let k = 0; k < angles.length; k++) {
-      const angle = angles[k];
-      const reach = reaches[k];
-      const chain = [corner];
-      let prev = corner;
+    for (const bn of bridge) {
+      const chain = [V];
+      let prev = V;
       for (let s = 1; s <= nodesPer; s++) {
-        const frac = Math.pow(s / nodesPer, 1.5);
-        const x = def.x + Math.cos(angle) * reach * frac;
-        const y = def.y + Math.sin(angle) * reach * frac;
-        const isTip = s === nodesPer;
-        const node = addNode(x, y, isTip); // outer tip anchored to the wall
-        addSpring(prev, node, 1.2 + cp * 0.8, "frame");
-        prev = node;
-        chain.push(node);
+        if (s === nodesPer) {
+          addSpring(prev, bn, 1.0 + cp * 0.5, "frame"); // reuse bridge node as the tip
+          chain.push(bn);
+        } else {
+          const f = Math.pow(s / nodesPer, 1.3);
+          const node = addNode(V.x + (bn.x - V.x) * f, V.y + (bn.y - V.y) * f, false);
+          addSpring(prev, node, s === 1 ? 1.0 + cp * 0.5 : 0.8, "frame");
+          prev = node;
+          chain.push(node);
+        }
       }
       radials.push(chain);
     }
@@ -256,37 +263,34 @@
       addSpring(a, b, width, kind);
     };
 
-    // Weave between each pair of neighbouring radials: a ring at each level
-    // plus a diagonal brace forming triangles. Density falls off outward
-    // (rising skip with ring index r) so the centre-facing edge stays open.
+    // Weave rings + diagonal braces between neighbouring radials (triangles).
+    // Density falls off outward so the centre-facing edge stays open.
     for (let k = 0; k < radials.length - 1; k++) {
       const A = radials[k], B = radials[k + 1];
-      for (let r = 1; r <= nodesPer; r++) {
-        const outward = r / nodesPer;          // 0 near corner → 1 at tip
-        const ringSkip  = 0.10 + (1 - cp) * 0.15 + outward * 0.45;
-        const braceSkip = 0.35 + (1 - cp) * 0.15 + outward * 0.45;
-        // Ring: same level across the gap.
+      for (let r = 1; r < nodesPer; r++) { // bridge level already tied by the bridge
+        const outward = r / nodesPer;
+        const ringSkip  = 0.10 + (1 - cp) * 0.15 + outward * 0.40;
+        const braceSkip = 0.35 + (1 - cp) * 0.15 + outward * 0.40;
         tryThread(A[r], B[r], 0.7, "ring", ringSkip);
-        // Brace: diagonal to the previous level → triangles with the rings.
         tryThread(A[r], B[r - 1], 0.5, "brace", braceSkip);
       }
     }
 
-    // Decay: snap some ring/brace threads so the web reads as tattered. The
-    // frame scaffold is spared so the web never fully vanishes. Deterministic.
+    // Decay: snap some of THIS corner's ring/brace threads. Frame is spared so
+    // the web never fully vanishes. Deterministic via the shared `rand`.
     const breaks = world.params.breaks;
     if (breaks > 0) {
-      for (const s of world.springs) {
+      for (let i = startSpring; i < world.springs.length; i++) {
+        const s = world.springs[i];
         if (s.kind === "frame") continue;
         if (rand() < breaks) s.broken = true;
       }
     }
 
-    // Dangling loose strands: short chains hanging off interior web nodes,
-    // pinned only at the top so gravity droops them into catenaries. They sway
-    // when poked and are the strongest "abandoned cobweb" cue.
+    // Dangling loose strands: hang straight down from interior web nodes (with
+    // gravity). Strongest "abandoned cobweb" cue; only ever droop downward.
     const numStrands = world.params.strands;
-    const interior = radials.flatMap((c) => c.slice(1, nodesPer)); // skip corner & pinned tip
+    const interior = radials.flatMap((c) => c.slice(1, nodesPer)); // skip vertex & bridge tip
     for (let i = 0; i < numStrands && interior.length; i++) {
       const from = interior[Math.floor(rand() * interior.length)];
       const segs = 3 + Math.floor(rand() * 3);
@@ -364,10 +368,12 @@
     const g = world.params.grime;
     if (g <= 0) return;
     for (const c of world.grimeCorners) {
+      // Floor corners read a touch grimier than ceiling corners.
+      const w = c.floor ? 1.3 : 1.0;
       // Dust haze — light cool grey, larger and softer.
       const hazeR = c.reach * 0.95;
       const haze = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, hazeR);
-      haze.addColorStop(0, `rgba(135, 135, 142, ${0.07 * g})`);
+      haze.addColorStop(0, `rgba(135, 135, 142, ${0.07 * g * w})`);
       haze.addColorStop(1, "rgba(135, 135, 142, 0)");
       ctx.fillStyle = haze;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -375,7 +381,7 @@
       // Vignette — subtle cool darkening tucked right into the corner.
       const vigR = c.reach * 0.6;
       const vig = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, vigR);
-      vig.addColorStop(0, `rgba(55, 55, 62, ${0.11 * g})`);
+      vig.addColorStop(0, `rgba(55, 55, 62, ${0.11 * g * w})`);
       vig.addColorStop(1, "rgba(55, 55, 62, 0)");
       ctx.fillStyle = vig;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
