@@ -98,59 +98,79 @@
       const numRings    = Math.max(2, Math.round(2 + cp * 3));
       const fanSpan     = def.a1 - def.a0;
 
-      // Build radial angles: always anchor both fan edges, fill in between
-      const angles = [
-        def.a0 + rand() * fanSpan * 0.12,
-        def.a1 - rand() * fanSpan * 0.12,
-      ];
+      // Build radial angles: uneven spacing via random increments, not uniform grid
+      const angles = [];
+      // First and last hug the fan edges (with small random inset)
+      angles.push(def.a0 + rand() * fanSpan * 0.08);
+      angles.push(def.a1 - rand() * fanSpan * 0.08);
       for (let k = 0; k < numRadials - 2; k++) {
+        // Base position is evenly spaced, but nudged by up to ±40% of a slot width
         const base  = def.a0 + ((k + 1) / (numRadials - 1)) * fanSpan;
-        const noise = (rand() - 0.5) * (fanSpan / numRadials) * 0.9;
+        const noise = (rand() - 0.5) * (fanSpan / (numRadials - 1)) * 0.80;
         angles.push(base + noise);
       }
       angles.sort((a, b) => a - b);
 
-      // Radial endpoints (varying lengths for ragged look)
-      const eps = angles.map(angle => ({
-        angle,
-        x: def.x + Math.cos(angle) * spread * (0.50 + rand() * 0.50),
-        y: def.y + Math.sin(angle) * spread * (0.50 + rand() * 0.50),
-      }));
+      // Per-radial reach: heavy variation so lines are visibly long/short
+      // Weight draws toward extremes (very short or near-full) for organic look
+      const reaches = angles.map(() => {
+        const r = rand();
+        // Skew distribution: many short, some long, few mid
+        return spread * (0.25 + Math.pow(r, 0.6) * 0.75);
+      });
 
-      // Draw radials
+      // Draw radials as slight curves (quadraticCurve with small perpendicular bow)
       ctx.strokeStyle = `rgba(200, 195, 180, ${Math.min(0.9, opacity)})`;
       ctx.lineWidth   = 1.2 + cp * 0.8;
-      for (const ep of eps) {
+      for (let k = 0; k < angles.length; k++) {
+        const angle = angles[k];
+        const reach = reaches[k];
+        const ex = def.x + Math.cos(angle) * reach;
+        const ey = def.y + Math.sin(angle) * reach;
+
+        // Perpendicular bow: small sideways deflection at midpoint
+        const bowAmt  = reach * (rand() * 0.06 - 0.01); // slight, mostly one direction
+        const perpX   = -Math.sin(angle) * bowAmt;
+        const perpY   =  Math.cos(angle) * bowAmt;
+        const midX    = def.x + Math.cos(angle) * reach * 0.5 + perpX;
+        const midY    = def.y + Math.sin(angle) * reach * 0.5 + perpY;
+
         ctx.beginPath();
         ctx.moveTo(def.x, def.y);
-        ctx.lineTo(ep.x, ep.y);
+        ctx.quadraticCurveTo(midX, midY, ex, ey);
         ctx.stroke();
       }
 
-      // Draw connecting rings between adjacent radials
+      // Draw connecting rings: variable sag, asymmetric endpoints, aggressive gaps
       ctx.strokeStyle = `rgba(200, 195, 180, ${Math.min(0.9, opacity * 0.85)})`;
       ctx.lineWidth   = 0.8;
+      // Skip rate increases for outer rings (outermost rings often incomplete)
+      const baseSkip = 0.18 + (1 - cp) * 0.20;
       for (let r = 0; r < numRings; r++) {
-        const t = (r + 1) / (numRings + 1);
+        const t         = (r + 1) / (numRings + 1);
+        const outerBias = t * 0.25; // outer rings drop out more
         for (let k = 0; k < angles.length - 1; k++) {
-          // Younger corners are more ragged (higher skip rate)
-          if (rand() < 0.10 + (1 - cp) * 0.22) continue;
+          if (rand() < baseSkip + outerBias) continue;
 
-          const r1 = spread * t * (0.88 + rand() * 0.24);
-          const r2 = spread * t * (0.88 + rand() * 0.24);
-          const x1 = def.x + Math.cos(angles[k])     * r1;
-          const y1 = def.y + Math.sin(angles[k])     * r1;
-          const x2 = def.x + Math.cos(angles[k + 1]) * r2;
-          const y2 = def.y + Math.sin(angles[k + 1]) * r2;
+          // Each endpoint placed at its own random fraction of the radial reach
+          const frac1 = t * (0.82 + rand() * 0.36);
+          const frac2 = t * (0.82 + rand() * 0.36);
+          const x1 = def.x + Math.cos(angles[k])     * reaches[k]     * frac1;
+          const y1 = def.y + Math.sin(angles[k])     * reaches[k]     * frac1;
+          const x2 = def.x + Math.cos(angles[k + 1]) * reaches[k + 1] * frac2;
+          const y2 = def.y + Math.sin(angles[k + 1]) * reaches[k + 1] * frac2;
 
-          const span = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-          const sag  = span * 0.055 * (1 + phase * 0.25);
+          const span   = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+          // Sag varies randomly per segment (not uniform)
+          const sagMag = span * (0.02 + rand() * 0.12) * (1 + phase * 0.20);
+          // Lateral wobble in control point
+          const wobX   = (rand() - 0.5) * span * 0.12;
 
           ctx.beginPath();
           ctx.moveTo(x1, y1);
           ctx.quadraticCurveTo(
-            (x1 + x2) / 2 + (rand() - 0.5) * 8,
-            (y1 + y2) / 2 + sag + (rand() - 0.5) * 4,
+            (x1 + x2) / 2 + wobX,
+            (y1 + y2) / 2 + sagMag,
             x2, y2,
           );
           ctx.stroke();
