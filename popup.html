@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <style>
-    body { font-family: system-ui; padding: 12px; width: 180px; }
+    body { font-family: system-ui; padding: 12px; width: 200px; }
     h3 { margin: 0 0 10px; font-size: 13px; color: #555; }
     button {
       display: block; width: 100%; margin-bottom: 6px;
@@ -11,12 +11,25 @@
       background: #f8f8f8; cursor: pointer; font-size: 13px; text-align: left;
     }
     button:hover { background: #eee; }
-    hr { border: none; border-top: 1px solid #eee; margin: 8px 0; }
+    hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
     #status { font-size: 11px; color: #888; margin-top: 6px; min-height: 14px; }
+    .slider-wrap { margin: 2px 0 4px; }
+    #phase { width: 100%; }
+    .scale { display: flex; justify-content: space-between;
+      font-size: 9px; color: #aaa; margin-top: 2px; }
+    #phaseLabel { font-size: 12px; color: #555; font-weight: 600; margin-bottom: 4px; }
   </style>
 </head>
 <body>
   <h3>Arachne debug</h3>
+
+  <div id="phaseLabel">階段 0.00</div>
+  <div class="slider-wrap">
+    <input type="range" id="phase" min="0" max="4" step="0.01" value="0">
+    <div class="scale"><span>初生</span><span>繁榮</span><span>失修</span><span>腐朽</span></div>
+  </div>
+  <hr>
+
   <button data-ms="0">清除</button>
   <button data-ms="300000">初生（5 分鐘）</button>
   <button data-ms="2700000">繁榮（45 分鐘）</button>
