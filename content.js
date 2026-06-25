@@ -133,12 +133,12 @@
   const DAMPING = 0.98;          // velocity retention per frame
   const SLEEP_ENERGY = 0.02;     // total kinetic energy below which we may sleep
   const SLEEP_FRAMES = 30;       // consecutive calm frames required before sleeping
-  const MOUSE_RADIUS = 90;       // px: how close the cursor must be to disturb a node
+  const MOUSE_RADIUS = 45;       // px: how close the cursor must be to disturb a node
   const MOUSE_FORCE = 0.35;      // how hard the cursor shoves nearby nodes
   // Dust is a physical particle layer on the floor: a broom (the cursor) sweeps
   // motes along its motion and kicks them into the air; they fall back under
   // gravity and resettle on the floor.
-  const DUST_RADIUS = 95;        // px: broom reach
+  const DUST_RADIUS = 48;        // px: broom reach
   const SWEEP_SPEED_CAP = 16;    // ignore cursor speed beyond this (flicks)
   const SWEEP_TRANSFER = 0.16;   // fraction of cursor velocity imparted to motes
   const SWEEP_KICK = 0.12;       // gentle upward kick, scaled by sweep speed
