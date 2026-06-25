@@ -90,7 +90,7 @@
     nodes: [],
     springs: [],
     grimeCorners: [], // [{x, y, reach, floor}] for the grime/vignette layer
-    dust: [],         // [{x, y, r, a, birth}] static dust motes
+    dust: [],         // floor dust particles: {x,y,vx,vy,groundY,r,a,birth,settled}
     fluff: [],        // [{node, r, a, birth}] dust clumps caught on intersections
     params: paramsForPhase(0),
     phase: 0,
@@ -105,10 +105,15 @@
   const SLEEP_FRAMES = 30;       // consecutive calm frames required before sleeping
   const MOUSE_RADIUS = 90;       // px: how close the cursor must be to disturb a node
   const MOUSE_FORCE = 0.35;      // how hard the cursor shoves nearby nodes
-  const DUST_RADIUS = 120;       // px: cursor reach for brushing dust
-  const DUST_PUSH = 2.4;         // how hard brushed motes scatter
-  const DUST_WIPE = 0.9;         // how much a pass clears (reveals) dust
-  const DUST_REFOG = 0.0035;     // per-frame re-fog rate (~5s to recover fully)
+  // Dust is a physical particle layer on the floor: a broom (the cursor) sweeps
+  // motes along its motion and kicks them into the air; they fall back under
+  // gravity and resettle on the floor.
+  const DUST_RADIUS = 95;        // px: broom reach
+  const SWEEP_TRANSFER = 0.55;   // fraction of cursor velocity imparted to motes
+  const SWEEP_KICK = 0.45;       // extra upward kick, scaled by sweep speed
+  const DUST_GRAV = 0.28;        // gravity pulling airborne dust back down
+  const DUST_AIR = 0.96;         // air drag while airborne
+  const DUST_FRICTION = 0.80;    // ground friction once a mote lands
 
   function addNode(x, y, pinned) {
     const n = { x, y, px: x, py: y, pinned: !!pinned, active: false };
@@ -183,69 +188,68 @@
     }
   }
 
-  // Dust motes, built at max density with per-mote birth phases so dust
-  // accumulates over time. Rather than an even scatter, motes are grouped into
-  // clusters (uneven patches) and mixed between fine "grain" (a faint film) and
-  // larger specks (clumps) — reads as a dusty film, not isolated dots. Floor
-  // corners get far more. Each mote carries dynamic state (vx/vy/cleared) so it
-  // can be brushed aside and wiped clean by the cursor, then slowly re-fog.
+  // Dust as a physical particle layer resting on the FLOOR (a band along the
+  // bottom, denser toward the two bottom corners). Mostly fine "grain" with a
+  // few larger clumps; per-mote birth phases so dust accumulates over time.
+  // Each mote remembers its resting height (groundY) and can be swept/kicked
+  // by the broom, then falls back under gravity and resettles.
   function seedDust(rand) {
-    for (const c of world.grimeCorners) {
-      const dirX = c.x === 0 ? 1 : -1;
-      const dirY = c.y === 0 ? 1 : -1;
-      const clusters = c.floor ? 5 : 3;
-      for (let cl = 0; cl < clusters; cl++) {
-        // Cluster centre, biased toward the corner (and the floor edge below).
-        const ct   = Math.pow(rand(), 1.5);
-        const crad = ct * c.reach;
-        const cang = c.floor ? rand() * (Math.PI / 2) * 0.5 : rand() * (Math.PI / 2);
-        const cx = c.x + dirX * Math.cos(cang) * crad;
-        const cy = c.y + dirY * Math.sin(cang) * crad;
-        const spread = c.reach * (0.10 + rand() * 0.18);
-        const motes  = Math.round((c.floor ? 24 : 12) * (0.6 + rand() * 0.8));
-        for (let i = 0; i < motes; i++) {
-          // Gaussian-ish scatter around the cluster centre (Box–Muller radius).
-          const rr = spread * Math.sqrt(-2 * Math.log(rand() + 1e-6)) * 0.5;
-          const th = rand() * Math.PI * 2;
-          const grain = rand() < 0.7; // mostly fine film, some larger clumps
-          world.dust.push({
-            x: cx + Math.cos(th) * rr,
-            y: cy + Math.sin(th) * rr,
-            r: grain ? 0.5 + rand() * 0.6 : 1.2 + rand() * 2.0,
-            a: grain ? 0.08 + rand() * 0.09 : 0.16 + rand() * 0.20,
-            birth: 1.0 + rand() * 3.0,
-            vx: 0, vy: 0, cleared: 0,
-          });
-        }
+    const W = canvas.width, H = canvas.height;
+    const floorY = H - 2;
+    const bandH = Math.min(H * 0.11, 90);
+    const total = 380;
+    for (let i = 0; i < total; i++) {
+      // x: half clustered near the two bottom corners, half spread along floor.
+      let x;
+      if (rand() < 0.5) {
+        const t = Math.pow(rand(), 1.8) * W * 0.32;
+        x = rand() < 0.5 ? t : W - t;
+      } else {
+        x = rand() * W;
       }
+      // y: within the floor band, denser toward the very bottom.
+      const y = floorY - Math.pow(rand(), 0.6) * bandH;
+      const grain = rand() < 0.7;
+      world.dust.push({
+        x, y, vx: 0, vy: 0,
+        groundY: y,                                  // its resting surface
+        r: grain ? 0.5 + rand() * 0.6 : 1.2 + rand() * 2.0,
+        a: grain ? 0.08 + rand() * 0.09 : 0.16 + rand() * 0.20,
+        birth: 1.0 + rand() * 3.0,
+        settled: true,
+      });
     }
   }
 
-  // Per-frame dust update: scattered motes drift to a stop (friction, no
-  // spring-back — dust doesn't return like silk), and wiped motes slowly re-fog.
+  // Per-frame dust update: airborne/sliding motes fall under gravity, land on
+  // their resting surface and slide to a stop. Settled motes are skipped (so
+  // resting dust costs nothing and lets the loop sleep).
   function updateDust() {
     const phase = world.phase;
+    const W = canvas.width;
     for (const d of world.dust) {
-      if (d.birth > phase) continue;
-      if (d.vx !== 0 || d.vy !== 0) {
-        d.x += d.vx; d.y += d.vy;
-        d.vx *= 0.85; d.vy *= 0.85;
-        if (Math.abs(d.vx) < 0.01) d.vx = 0;
-        if (Math.abs(d.vy) < 0.01) d.vy = 0;
-      }
-      if (d.cleared > 0) {
-        d.cleared -= DUST_REFOG;           // gradually fogs back over a few seconds
-        if (d.cleared < 0) d.cleared = 0;
+      if (d.birth > phase || d.settled) continue;
+      d.vy += DUST_GRAV;
+      d.vx *= DUST_AIR;
+      d.x += d.vx;
+      d.y += d.vy;
+      if (d.x < 0)      { d.x = 0; d.vx *= -0.3; }
+      else if (d.x > W) { d.x = W; d.vx *= -0.3; }
+      if (d.y >= d.groundY) {            // landed on its surface
+        d.y = d.groundY;
+        d.vy = 0;
+        d.vx *= DUST_FRICTION;
+        if (Math.abs(d.vx) < 0.05) { d.vx = 0; d.settled = true; }
       }
     }
   }
 
-  // Is any dust still moving or recovering? Keeps the loop awake until settled.
+  // Any dust still in motion? Keeps the loop awake until everything resettles.
   function dustActive() {
     const phase = world.phase;
     for (const d of world.dust) {
-      if (d.birth > phase) continue;
-      if (d.vx !== 0 || d.vy !== 0 || d.cleared > 0.002) return true;
+      if (d.birth > phase || d.settled) continue;
+      return true;
     }
     return false;
   }
@@ -498,9 +502,7 @@
     const phase = world.phase;
     for (const d of world.dust) {
       if (d.birth > phase) continue;
-      const eff = d.a * (1 - d.cleared); // wiped motes thin out, then re-fog
-      if (eff < 0.01) continue;
-      ctx.fillStyle = `rgba(150, 150, 156, ${eff})`;
+      ctx.fillStyle = `rgba(150, 150, 156, ${d.a})`;
       ctx.beginPath();
       ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
       ctx.fill();
@@ -613,8 +615,10 @@
     wake();
   }
 
-  // ── Mouse interaction: shove web nodes (elastic) and brush dust (scatter +
-  // wipe). The web springs back; dust scatters, stays put, and slowly re-fogs.
+  // ── Mouse interaction: poke the web (elastic, springs back) and sweep the
+  // floor dust like a broom — motes are pushed along the cursor's motion and
+  // kicked up, then fall back under gravity.
+  let lastMx = null, lastMy = null;
   window.addEventListener("mousemove", (e) => {
     if (world.nodes.length === 0) return;
     const mx = e.clientX, my = e.clientY;
@@ -635,18 +639,25 @@
       }
     }
 
-    const dr2 = DUST_RADIUS * DUST_RADIUS;
-    for (const dst of world.dust) {
-      if (dst.birth > phase) continue;
-      const dx = dst.x - mx, dy = dst.y - my;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < dr2) {
-        const d = Math.sqrt(d2) || 1e-6;
-        const f = 1 - d / DUST_RADIUS;
-        dst.cleared = Math.min(1, dst.cleared + f * DUST_WIPE); // wipe a clean streak
-        dst.vx += (dx / d) * f * DUST_PUSH;                     // and scatter the motes
-        dst.vy += (dy / d) * f * DUST_PUSH;
-        touched = true;
+    // Broom: cursor velocity = sweep direction & strength.
+    const cvx = lastMx == null ? 0 : mx - lastMx;
+    const cvy = lastMy == null ? 0 : my - lastMy;
+    const speed = Math.hypot(cvx, cvy);
+    lastMx = mx; lastMy = my;
+    if (speed > 0.5) {
+      const dr2 = DUST_RADIUS * DUST_RADIUS;
+      for (const dst of world.dust) {
+        if (dst.birth > phase) continue;
+        const dx = dst.x - mx, dy = dst.y - my;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < dr2) {
+          const f = 1 - Math.sqrt(d2) / DUST_RADIUS;
+          // Carry the mote along the sweep, plus an upward kick (raises dust).
+          dst.vx += cvx * SWEEP_TRANSFER * f;
+          dst.vy += cvy * SWEEP_TRANSFER * f - speed * SWEEP_KICK * f;
+          dst.settled = false;
+          touched = true;
+        }
       }
     }
 
