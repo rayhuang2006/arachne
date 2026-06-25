@@ -13,20 +13,35 @@
   document.body.appendChild(canvas);
   const ctx = canvas.getContext("2d");
 
-  // Pre-rendered soft "puff" sprite for dust: a radial gradient fading to
-  // transparent. Drawn (scaled, low alpha) per mote so the dust reads as a soft
-  // haze rather than crisp dots — even while the underlying particles move.
-  const dustSprite = document.createElement("canvas");
-  dustSprite.width = dustSprite.height = 32;
-  {
-    const dc = dustSprite.getContext("2d");
-    const g = dc.createRadialGradient(16, 16, 0, 16, 16, 16);
-    g.addColorStop(0,   "rgba(152, 152, 158, 1)");
-    g.addColorStop(0.5, "rgba(152, 152, 158, 0.45)");
-    g.addColorStop(1,   "rgba(152, 152, 158, 0)");
-    dc.fillStyle = g;
-    dc.fillRect(0, 0, 32, 32);
+  // Pre-rendered dust "puff" sprites. Each is a small irregular cloud — several
+  // overlapping soft blobs of varying size/offset — so the dust reads as wispy
+  // smoke-like clumps rather than uniform round dots. A few variants give
+  // variety; each mote draws one (scaled, low alpha) and the overlaps build haze.
+  function makeDustSprite(prng) {
+    const S = 64;
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = S;
+    const dc = cv.getContext("2d");
+    const blobs = 5 + Math.floor(prng() * 4);
+    for (let i = 0; i < blobs; i++) {
+      const cx = S / 2 + (prng() - 0.5) * S * 0.45;
+      const cy = S / 2 + (prng() - 0.5) * S * 0.45;
+      const rad = S * (0.12 + prng() * 0.20);
+      const a = 0.10 + prng() * 0.16;
+      const g = dc.createRadialGradient(cx, cy, 0, cx, cy, rad);
+      g.addColorStop(0, `rgba(150, 150, 156, ${a})`);
+      g.addColorStop(1, "rgba(150, 150, 156, 0)");
+      dc.fillStyle = g;
+      dc.beginPath();
+      dc.arc(cx, cy, rad, 0, Math.PI * 2);
+      dc.fill();
+    }
+    return cv;
   }
+  const DUST_SPRITES = (() => {
+    const p = mulberry32(0x5eed5);
+    return [makeDustSprite(p), makeDustSprite(p), makeDustSprite(p), makeDustSprite(p)];
+  })();
 
   // ── Seeded PRNG ──────────────────────────────────────────────────────────
   function mulberry32(seed) {
@@ -124,10 +139,12 @@
   // motes along its motion and kicks them into the air; they fall back under
   // gravity and resettle on the floor.
   const DUST_RADIUS = 95;        // px: broom reach
-  const SWEEP_TRANSFER = 0.55;   // fraction of cursor velocity imparted to motes
-  const SWEEP_KICK = 0.45;       // extra upward kick, scaled by sweep speed
-  const DUST_GRAV = 0.28;        // gravity pulling airborne dust back down
-  const DUST_AIR = 0.96;         // air drag while airborne
+  const SWEEP_SPEED_CAP = 22;    // ignore cursor speed beyond this (flicks)
+  const SWEEP_TRANSFER = 0.30;   // fraction of cursor velocity imparted to motes
+  const SWEEP_KICK = 0.12;       // gentle upward kick, scaled by sweep speed
+  const DUST_MAX_RISE = 55;      // px: how high a swept mote can lift off the floor
+  const DUST_GRAV = 0.30;        // gravity pulling airborne dust back down
+  const DUST_AIR = 0.90;         // air drag while airborne
   const DUST_FRICTION = 0.80;    // ground friction once a mote lands
 
   function addNode(x, y, pinned) {
@@ -228,9 +245,10 @@
       world.dust.push({
         x, y, vx: 0, vy: 0,
         groundY: y,                                  // its resting surface
-        // r is the soft-puff diameter; a is kept low so overlap builds haze.
-        r: grain ? 9 + rand() * 8 : 18 + rand() * 14,
-        a: grain ? 0.05 + rand() * 0.05 : 0.07 + rand() * 0.07,
+        // r is the puff diameter; a is kept low so overlapping puffs build haze.
+        r: grain ? 16 + rand() * 14 : 30 + rand() * 22,
+        a: grain ? 0.05 + rand() * 0.05 : 0.06 + rand() * 0.06,
+        s: Math.floor(rand() * DUST_SPRITES.length),
         birth: 1.0 + rand() * 3.0,
         settled: true,
       });
@@ -251,6 +269,9 @@
       d.y += d.vy;
       if (d.x < 0)      { d.x = 0; d.vx *= -0.3; }
       else if (d.x > W) { d.x = W; d.vx *= -0.3; }
+      // Cap how high dust can rise — it puffs up near the floor, never flies off.
+      const ceil = d.groundY - DUST_MAX_RISE;
+      if (d.y < ceil) { d.y = ceil; if (d.vy < 0) d.vy = 0; }
       if (d.y >= d.groundY) {            // landed on its surface
         d.y = d.groundY;
         d.vy = 0;
@@ -519,7 +540,7 @@
     for (const d of world.dust) {
       if (d.birth > phase) continue;
       ctx.globalAlpha = d.a;
-      ctx.drawImage(dustSprite, d.x - d.r / 2, d.y - d.r / 2, d.r, d.r);
+      ctx.drawImage(DUST_SPRITES[d.s], d.x - d.r / 2, d.y - d.r / 2, d.r, d.r);
     }
     ctx.globalAlpha = 1;
   }
@@ -657,9 +678,13 @@
     // Broom: cursor velocity = sweep direction & strength.
     const cvx = lastMx == null ? 0 : mx - lastMx;
     const cvy = lastMy == null ? 0 : my - lastMy;
-    const speed = Math.hypot(cvx, cvy);
+    const rawSpeed = Math.hypot(cvx, cvy);
     lastMx = mx; lastMy = my;
-    if (speed > 0.5) {
+    if (rawSpeed > 0.5) {
+      // Cap the effective sweep so a fast flick doesn't launch dust skyward.
+      const scale = Math.min(rawSpeed, SWEEP_SPEED_CAP) / rawSpeed;
+      const sx = cvx * scale, sy = cvy * scale;
+      const speed = Math.min(rawSpeed, SWEEP_SPEED_CAP);
       const dr2 = DUST_RADIUS * DUST_RADIUS;
       for (const dst of world.dust) {
         if (dst.birth > phase) continue;
@@ -667,9 +692,9 @@
         const d2 = dx * dx + dy * dy;
         if (d2 < dr2) {
           const f = 1 - Math.sqrt(d2) / DUST_RADIUS;
-          // Carry the mote along the sweep, plus an upward kick (raises dust).
-          dst.vx += cvx * SWEEP_TRANSFER * f;
-          dst.vy += cvy * SWEEP_TRANSFER * f - speed * SWEEP_KICK * f;
+          // Carry the mote along the sweep, plus a gentle upward kick.
+          dst.vx += sx * SWEEP_TRANSFER * f;
+          dst.vy += sy * SWEEP_TRANSFER * f - speed * SWEEP_KICK * f;
           dst.settled = false;
           touched = true;
         }
