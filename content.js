@@ -139,13 +139,13 @@
   // motes along its motion and kicks them into the air; they fall back under
   // gravity and resettle on the floor.
   const DUST_RADIUS = 95;        // px: broom reach
-  const SWEEP_SPEED_CAP = 22;    // ignore cursor speed beyond this (flicks)
-  const SWEEP_TRANSFER = 0.30;   // fraction of cursor velocity imparted to motes
+  const SWEEP_SPEED_CAP = 16;    // ignore cursor speed beyond this (flicks)
+  const SWEEP_TRANSFER = 0.16;   // fraction of cursor velocity imparted to motes
   const SWEEP_KICK = 0.12;       // gentle upward kick, scaled by sweep speed
   const DUST_MAX_RISE = 55;      // px: how high a swept mote can lift off the floor
   const DUST_GRAV = 0.30;        // gravity pulling airborne dust back down
-  const DUST_AIR = 0.90;         // air drag while airborne
-  const DUST_FRICTION = 0.80;    // ground friction once a mote lands
+  const DUST_AIR = 0.85;         // air drag while airborne (lower = stops sooner)
+  const DUST_FRICTION = 0.70;    // ground friction once a mote lands
 
   function addNode(x, y, pinned) {
     const n = { x, y, px: x, py: y, pinned: !!pinned, active: false };
