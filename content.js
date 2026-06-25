@@ -146,6 +146,9 @@
   const DUST_GRAV = 0.30;        // gravity pulling airborne dust back down
   const DUST_AIR = 0.85;         // air drag while airborne (lower = stops sooner)
   const DUST_FRICTION = 0.70;    // ground friction once a mote lands
+  const WEB_BREAK_SPEED = 11;    // cursor speed above which a sweep snaps threads
+  const WEB_CUT_RADIUS = 38;     // px: how close a thread must be to be snapped
+  const WEB_CUT_CHANCE = 0.5;    // per-event chance a nearby thread snaps
 
   function addNode(x, y, pinned) {
     const n = { x, y, px: x, py: y, pinned: !!pinned, active: false };
@@ -167,6 +170,7 @@
       breakAt: breakAt == null ? Infinity : breakAt,
       sag: 0,
       alive: false,
+      cut: false,   // permanently swept away by the broom (survives phase changes)
     };
     world.springs.push(s);
     return s;
@@ -213,9 +217,18 @@
   function applyPhase(phase) {
     world.phase = phase;
     world.params = paramsForPhase(phase);
+    for (const s of world.springs) {
+      s.alive = !s.cut && s.birth <= phase && s.breakAt > phase;
+    }
+    recomputeActive();
+  }
+
+  // A node is "active" (integrated, counted toward sleep) only if it still has
+  // at least one alive spring. Recomputed after phase changes and web cuts so
+  // nodes freed by a cut stop free-falling and the loop can settle to sleep.
+  function recomputeActive() {
     for (const n of world.nodes) n.active = false;
     for (const s of world.springs) {
-      s.alive = s.birth <= phase && s.breakAt > phase;
       if (s.alive) { s.a.active = true; s.b.active = true; }
     }
   }
@@ -248,7 +261,7 @@
     // along the floor (a quarter disc).
     for (const cx of [0, W]) {
       const dirX = cx === 0 ? 1 : -1;
-      for (let i = 0; i < 170; i++) {
+      for (let i = 0; i < 130; i++) {
         const t   = Math.pow(rand(), 1.8);           // dense near the corner
         const rad = t * reach;
         const ang = rand() * (Math.PI / 2);          // 0 = along floor, π/2 = up wall
@@ -257,8 +270,24 @@
       }
     }
 
+    // Ceiling grime: clings to the top corners and along the top edge until
+    // swept — then (groundY = floor) it tumbles all the way down to the floor.
+    for (const cx of [0, W]) {
+      const dirX = cx === 0 ? 1 : -1;
+      for (let i = 0; i < 70; i++) {
+        const t   = Math.pow(rand(), 1.8);
+        const rad = t * reach * 0.8;
+        const ang = rand() * (Math.PI / 2);          // 0 = along ceiling, π/2 = down wall
+        if (rand() < t * 0.5) continue;
+        push(cx + dirX * Math.cos(ang) * rad, Math.sin(ang) * rad);
+      }
+    }
+    for (let i = 0; i < 55; i++) {                    // light haze along the ceiling
+      push(rand() * W, Math.pow(rand(), 0.7) * Math.min(H * 0.05, 36));
+    }
+
     // Light dust scattered along the rest of the floor.
-    for (let i = 0; i < 110; i++) {
+    for (let i = 0; i < 90; i++) {
       push(rand() * W, floorY - Math.pow(rand(), 0.7) * Math.min(H * 0.06, 45));
     }
   }
@@ -287,6 +316,23 @@
         if (Math.abs(d.vx) < 0.05) { d.vx = 0; d.settled = true; }
       }
     }
+  }
+
+  // A swept-off bit of web becomes a little clump of falling dust/debris that
+  // drops to the floor (always visible — birth 0). Reuses the dust system so
+  // everything the broom dislodges ends up as floor dust.
+  function spawnDebris(x, y) {
+    world.dust.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 1.5,
+      vy: 0.5 + Math.random(),
+      groundY: canvas.height - 2,
+      r: 12 + Math.random() * 14,
+      a: 0.06 + Math.random() * 0.06,
+      s: Math.floor(Math.random() * DUST_SPRITES.length),
+      birth: 0,
+      settled: false,
+    });
   }
 
   // Any dust still in motion? Keeps the loop awake until everything resettles.
@@ -469,6 +515,7 @@
     const { gravity, stiffness, iterations, slack } = world.params;
 
     // Integrate free nodes that are part of the currently-alive web.
+    const floorY = canvas.height - 2;
     for (const n of world.nodes) {
       if (n.pinned || !n.active) continue;
       const vx = (n.x - n.px) * DAMPING;
@@ -477,6 +524,14 @@
       n.py = n.y;
       n.x += vx;
       n.y += vy + gravity;
+      // Floor: a web bit cut loose from its anchors falls and lands on the
+      // ground (instead of free-falling forever and never letting the loop
+      // sleep). Anchored web never reaches the floor, so this is harmless to it.
+      if (n.y > floorY) {
+        n.y = floorY;
+        n.py = n.y;                          // landed → no vertical velocity
+        n.px = n.x - (n.x - n.px) * 0.6;     // horizontal friction
+      }
     }
 
     // Satisfy distance constraints (several passes for stiffness).
@@ -709,6 +764,28 @@
           dst.settled = false;
           touched = true;
         }
+      }
+
+      // Two-stage web: a slow sweep only jiggles (handled above); a hard, fast
+      // sweep snaps the threads it crosses, which drop as falling debris.
+      if (rawSpeed > WEB_BREAK_SPEED) {
+        const cr2 = WEB_CUT_RADIUS * WEB_CUT_RADIUS;
+        let cutAny = false;
+        for (const s of world.springs) {
+          if (!s.alive) continue;
+          const cxm = (s.a.x + s.b.x) / 2, cym = (s.a.y + s.b.y) / 2;
+          const dx = cxm - mx, dy = cym - my;
+          if (dx * dx + dy * dy < cr2 && Math.random() < WEB_CUT_CHANCE) {
+            s.cut = true;
+            s.alive = false;
+            spawnDebris(cxm, cym);
+            cutAny = true;
+            touched = true;
+          }
+        }
+        // Freed nodes must stop being integrated, or they free-fall forever and
+        // the loop never sleeps.
+        if (cutAny) recomputeActive();
       }
     }
 
