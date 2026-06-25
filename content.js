@@ -220,38 +220,46 @@
     }
   }
 
-  // Dust as a physical particle layer resting on the FLOOR (a band along the
-  // bottom, denser toward the two bottom corners). Mostly fine "grain" with a
-  // few larger clumps; per-mote birth phases so dust accumulates over time.
-  // Each mote remembers its resting height (groundY) and can be swept/kicked
-  // by the broom, then falls back under gravity and resettles.
+  // Dust as physical particles forming the GRIME in the bottom corners (dense
+  // quarter-disc piles that climb the walls and run along the floor) plus a
+  // light spread across the floor. Crucially every mote's resting surface is the
+  // floor (groundY = floorY): the corner dirt clings in place until disturbed,
+  // and once you sweep it, gravity pulls it down and out of the corner — so the
+  // corner actually clears instead of just smearing.
   function seedDust(rand) {
     const W = canvas.width, H = canvas.height;
     const floorY = H - 2;
-    const bandH = Math.min(H * 0.11, 90);
-    const total = 380;
-    for (let i = 0; i < total; i++) {
-      // x: half clustered near the two bottom corners, half spread along floor.
-      let x;
-      if (rand() < 0.5) {
-        const t = Math.pow(rand(), 1.8) * W * 0.32;
-        x = rand() < 0.5 ? t : W - t;
-      } else {
-        x = rand() * W;
-      }
-      // y: within the floor band, denser toward the very bottom.
-      const y = floorY - Math.pow(rand(), 0.6) * bandH;
+    const reach = Math.min(W, H) * 0.30;
+
+    const push = (x, y) => {
       const grain = rand() < 0.7;
       world.dust.push({
         x, y, vx: 0, vy: 0,
-        groundY: y,                                  // its resting surface
-        // r is the puff diameter; a is kept low so overlapping puffs build haze.
+        groundY: floorY,                             // swept dust falls to the floor
         r: grain ? 16 + rand() * 14 : 30 + rand() * 22,
         a: grain ? 0.05 + rand() * 0.05 : 0.06 + rand() * 0.06,
         s: Math.floor(rand() * DUST_SPRITES.length),
         birth: 1.0 + rand() * 3.0,
         settled: true,
       });
+    };
+
+    // Bottom-corner grime piles: dense at the vertex, fading up the wall and
+    // along the floor (a quarter disc).
+    for (const cx of [0, W]) {
+      const dirX = cx === 0 ? 1 : -1;
+      for (let i = 0; i < 170; i++) {
+        const t   = Math.pow(rand(), 1.8);           // dense near the corner
+        const rad = t * reach;
+        const ang = rand() * (Math.PI / 2);          // 0 = along floor, π/2 = up wall
+        if (rand() < t * 0.4) continue;              // thin the outer edge
+        push(cx + dirX * Math.cos(ang) * rad, floorY - Math.sin(ang) * rad);
+      }
+    }
+
+    // Light dust scattered along the rest of the floor.
+    for (let i = 0; i < 110; i++) {
+      push(rand() * W, floorY - Math.pow(rand(), 0.7) * Math.min(H * 0.06, 45));
     }
   }
 
@@ -513,20 +521,23 @@
     const g = world.params.grime;
     if (g <= 0) return;
     for (const c of world.grimeCorners) {
-      // Floor corners read a touch grimier than ceiling corners.
-      const w = c.floor ? 1.3 : 1.0;
-      // Dust haze — light cool grey, larger and softer.
-      const hazeR = c.reach * 0.95;
-      const haze = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, hazeR);
-      haze.addColorStop(0, `rgba(135, 135, 142, ${0.07 * g * w})`);
-      haze.addColorStop(1, "rgba(135, 135, 142, 0)");
-      ctx.fillStyle = haze;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Floor corners get only a faint vignette — their dirt is now made of
+      // sweepable dust particles, so we don't bake a static haze you can't move.
+      // Ceiling corners keep a light ambient haze around the webs.
+      if (!c.floor) {
+        const hazeR = c.reach * 0.95;
+        const haze = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, hazeR);
+        haze.addColorStop(0, `rgba(135, 135, 142, ${0.06 * g})`);
+        haze.addColorStop(1, "rgba(135, 135, 142, 0)");
+        ctx.fillStyle = haze;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
 
-      // Vignette — subtle cool darkening tucked right into the corner.
+      // Vignette — subtle cool darkening tucked right into the corner (shadow,
+      // not dirt — stays put).
       const vigR = c.reach * 0.6;
       const vig = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, vigR);
-      vig.addColorStop(0, `rgba(55, 55, 62, ${0.11 * g * w})`);
+      vig.addColorStop(0, `rgba(55, 55, 62, ${0.07 * g})`);
       vig.addColorStop(1, "rgba(55, 55, 62, 0)");
       ctx.fillStyle = vig;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
