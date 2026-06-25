@@ -105,10 +105,10 @@
   const SLEEP_FRAMES = 30;       // consecutive calm frames required before sleeping
   const MOUSE_RADIUS = 90;       // px: how close the cursor must be to disturb a node
   const MOUSE_FORCE = 0.35;      // how hard the cursor shoves nearby nodes
-  const DUST_RADIUS = 70;        // px: cursor reach for brushing dust
-  const DUST_PUSH = 1.2;         // how hard brushed motes scatter
-  const DUST_WIPE = 0.5;         // how much a pass clears (reveals) dust
-  const DUST_REFOG = 0.005;      // per-frame re-fog rate (~3s to recover fully)
+  const DUST_RADIUS = 120;       // px: cursor reach for brushing dust
+  const DUST_PUSH = 2.4;         // how hard brushed motes scatter
+  const DUST_WIPE = 0.9;         // how much a pass clears (reveals) dust
+  const DUST_REFOG = 0.0035;     // per-frame re-fog rate (~5s to recover fully)
 
   function addNode(x, y, pinned) {
     const n = { x, y, px: x, py: y, pinned: !!pinned, active: false };
@@ -211,8 +211,8 @@
           world.dust.push({
             x: cx + Math.cos(th) * rr,
             y: cy + Math.sin(th) * rr,
-            r: grain ? 0.4 + rand() * 0.5 : 1.0 + rand() * 1.8,
-            a: grain ? 0.05 + rand() * 0.06 : 0.10 + rand() * 0.16,
+            r: grain ? 0.5 + rand() * 0.6 : 1.2 + rand() * 2.0,
+            a: grain ? 0.08 + rand() * 0.09 : 0.16 + rand() * 0.20,
             birth: 1.0 + rand() * 3.0,
             vx: 0, vy: 0, cleared: 0,
           });
