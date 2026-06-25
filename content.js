@@ -13,6 +13,21 @@
   document.body.appendChild(canvas);
   const ctx = canvas.getContext("2d");
 
+  // Pre-rendered soft "puff" sprite for dust: a radial gradient fading to
+  // transparent. Drawn (scaled, low alpha) per mote so the dust reads as a soft
+  // haze rather than crisp dots — even while the underlying particles move.
+  const dustSprite = document.createElement("canvas");
+  dustSprite.width = dustSprite.height = 32;
+  {
+    const dc = dustSprite.getContext("2d");
+    const g = dc.createRadialGradient(16, 16, 0, 16, 16, 16);
+    g.addColorStop(0,   "rgba(152, 152, 158, 1)");
+    g.addColorStop(0.5, "rgba(152, 152, 158, 0.45)");
+    g.addColorStop(1,   "rgba(152, 152, 158, 0)");
+    dc.fillStyle = g;
+    dc.fillRect(0, 0, 32, 32);
+  }
+
   // ── Seeded PRNG ──────────────────────────────────────────────────────────
   function mulberry32(seed) {
     return function () {
@@ -213,8 +228,9 @@
       world.dust.push({
         x, y, vx: 0, vy: 0,
         groundY: y,                                  // its resting surface
-        r: grain ? 0.5 + rand() * 0.6 : 1.2 + rand() * 2.0,
-        a: grain ? 0.08 + rand() * 0.09 : 0.16 + rand() * 0.20,
+        // r is the soft-puff diameter; a is kept low so overlap builds haze.
+        r: grain ? 9 + rand() * 8 : 18 + rand() * 14,
+        a: grain ? 0.05 + rand() * 0.05 : 0.07 + rand() * 0.07,
         birth: 1.0 + rand() * 3.0,
         settled: true,
       });
@@ -502,11 +518,10 @@
     const phase = world.phase;
     for (const d of world.dust) {
       if (d.birth > phase) continue;
-      ctx.fillStyle = `rgba(150, 150, 156, ${d.a})`;
-      ctx.beginPath();
-      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalAlpha = d.a;
+      ctx.drawImage(dustSprite, d.x - d.r / 2, d.y - d.r / 2, d.r, d.r);
     }
+    ctx.globalAlpha = 1;
   }
 
   // Layer 3: the web. Cool-grey threads; short/near read clearly, long/far
