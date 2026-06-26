@@ -4,6 +4,10 @@ A Chrome extension that lets idle tabs fall into disrepair. The longer a tab goe
 
 The result is interactive: poke the web to make it sway, or sweep dust and tear cobwebs away with the cursor like a broom.
 
+![Arachne demo](docs/demo.gif)
+
+> The demo scrubs through the decay stages, then sweeps the floor dust and tears the cobwebs. The effect is intentionally faint and semi-transparent in normal use.
+
 ## Features
 
 - Procedural spider web simulated as a mass-spring system with real gravity and sag.
