@@ -33,3 +33,7 @@ Leave a tab idle and revisit it to see it age. To preview without waiting, click
 ## Documentation
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the simulation, rendering, and auto-sleep work.
+
+## License
+
+Released under the [MIT License](LICENSE).
